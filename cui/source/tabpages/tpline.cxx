@@ -819,7 +819,7 @@ void SvxLineTabPage::Reset( const SfxItemSet* rAttrs )
         std::unique_ptr<SdrModel> pModel(
             new SdrModel(nullptr, nullptr, true));
         rtl::Reference<SdrPage> pPage = new SdrPage( *pModel, false );
-        pPage->SetSize(Size(1000,1000));
+        pPage->setSize({ 1_cm, 1_cm });
         pModel->InsertPage( pPage.get(), 0 );
         {
         SdrView aView( *pModel, pVDev );
@@ -1445,7 +1445,7 @@ void SvxLineTabPage::PopulateMenus()
         new SdrModel(nullptr, nullptr, true));
     // Page
     rtl::Reference<SdrPage> pPage = new SdrPage( *pModel, false );
-    pPage->SetSize(Size(1000,1000));
+    pPage->setSize({ 1_cm, 1_cm });
     pModel->InsertPage( pPage.get(), 0 );
     {
         // 3D View

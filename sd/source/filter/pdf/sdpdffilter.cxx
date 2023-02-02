@@ -97,7 +97,7 @@ static bool ImportPDF(SvStream& rStream, SdDrawDocument& rDocument)
             return false;
 
         // Make the page size match the rendered image.
-        pPage->SetSize(aSizeHMM);
+        pPage->setToolsSize(aSizeHMM);
 
         rtl::Reference<SdrGrafObj> pSdrGrafObj
             = new SdrGrafObj(rModel, rGraphic, tools::Rectangle(Point(), aSizeHMM));
