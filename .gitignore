@@ -1,0 +1,43 @@
+# Compiled Object files
+*.o
+*.obj
+*.lo
+*.slo
+
+# Compiled Libraries
+*.a
+*.so
+*.dylib
+*.lib
+*.dll
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Build directories
+build/
+bin/
+lib/
+instdir/
+workdir/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake-build-*/
+
+# ccache
+.ccache/
+
+# OS
+.DS_Store
+Thumbs.db
