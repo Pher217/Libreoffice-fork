@@ -90,42 +90,34 @@ cd ~/dev/officelabs-master
 echo -e "${GREEN}✓ Directory structure created at ~/dev/officelabs-master${NC}"
 echo ""
 
-# Step 5: Fork instructions
-echo -e "${YELLOW}=================================================${NC}"
-echo -e "${YELLOW}  MANUAL ACTION REQUIRED: Fork LibreOffice${NC}"
-echo -e "${YELLOW}=================================================${NC}"
+# Step 5: Fork verification
+echo -e "${GREEN}=================================================${NC}"
+echo -e "${GREEN}  Fork Already Exists!${NC}"
+echo -e "${GREEN}=================================================${NC}"
 echo ""
-echo "Please complete these steps on GitHub:"
+echo "Your fork is at: https://github.com/Pher217/Libreoffice-fork"
 echo ""
-echo "1. Go to: https://github.com/LibreOffice/core"
-echo "2. Click the 'Fork' button (top right)"
-echo "3. Set owner: Pher217"
-echo "4. Repository name: officelabs-core"
-echo "5. Description: LibreOffice fork with native AI integration - OfficeLabs Core"
-echo "6. UNCHECK 'Copy the master branch only' (we want all branches)"
-echo "7. Click 'Create fork'"
-echo ""
-echo -e "${YELLOW}After forking, press ENTER to continue...${NC}"
+echo -e "${GREEN}Press ENTER to continue with setup...${NC}"
 read
 
 # Step 6: Clone the fork
 echo -e "${BLUE}Step 6: Cloning your fork...${NC}"
 
-if [ -d "officelabs-core" ]; then
-    echo -e "${YELLOW}Directory officelabs-core already exists. Remove it? (y/n)${NC}"
+if [ -d "Libreoffice-fork" ]; then
+    echo -e "${YELLOW}Directory Libreoffice-fork already exists. Remove it? (y/n)${NC}"
     read -p "" -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        rm -rf officelabs-core
+        rm -rf Libreoffice-fork
     else
         echo "Skipping clone..."
-        cd officelabs-core
+        cd Libreoffice-fork
     fi
 fi
 
-if [ ! -d "officelabs-core" ]; then
-    git clone https://github.com/Pher217/officelabs-core.git
-    cd officelabs-core
+if [ ! -d "Libreoffice-fork" ]; then
+    git clone https://github.com/Pher217/Libreoffice-fork.git
+    cd Libreoffice-fork
 fi
 
 echo -e "${GREEN}✓ Fork cloned${NC}"
@@ -182,7 +174,7 @@ echo ""
 echo "Next steps:"
 echo ""
 echo "1. Configure LibreOffice build:"
-echo "   cd ~/dev/officelabs-master/officelabs-core"
+echo "   cd ~/dev/officelabs-master/Libreoffice-fork"
 echo "   ./autogen.sh --with-vendor=\"OfficeLabs\" --enable-python=system --without-java --disable-odk --enable-ccache"
 echo ""
 echo "2. Build LibreOffice (this takes 1-3 hours):"

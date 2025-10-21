@@ -24,13 +24,19 @@ This is a **complete setup package** for forking LibreOffice and integrating Off
 
 ## 🚀 Quick Start
 
-### Option 1: Fast Track
+### ✅ Step 1: Fork Complete!
 
-1. **Read:** `QUICK_START.md`
-2. **Fork:** LibreOffice on GitHub → `Pher217/officelabs-core`
-3. **Run:** `setup-officelabs-core.sh` in WSL2
-4. **Build:** LibreOffice (1-3 hours)
-5. **Done!**
+Your fork is ready: **[https://github.com/Pher217/Libreoffice-fork](https://github.com/Pher217/Libreoffice-fork)**
+
+### ⏳ Step 2: Run Setup Script
+
+**Start here:** Open `START_HERE.md` for immediate next steps
+
+**Quick command (from PowerShell):**
+
+```powershell
+wsl -d Ubuntu bash -c "cp /mnt/c/Users/philh/dev/officelabs-core/setup-officelabs-core.sh ~/ && cd ~ && chmod +x setup-officelabs-core.sh && ./setup-officelabs-core.sh"
+```
 
 ### Option 2: Detailed Guide
 

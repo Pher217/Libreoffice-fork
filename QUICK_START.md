@@ -6,15 +6,11 @@
 
 ## 🚀 Fast Track Setup
 
-### Step 1: Fork LibreOffice (2 minutes)
+### Step 1: Fork LibreOffice ✅ COMPLETED
 
-1. Open: https://github.com/LibreOffice/core
-2. Click "Fork"
-3. Settings:
-   - Owner: `Pher217`
-   - Name: `officelabs-core`
-   - **UNCHECK** "Copy the master branch only"
-4. Click "Create fork"
+Your fork is ready at: https://github.com/Pher217/Libreoffice-fork
+
+**Repository:** `Libreoffice-fork` - All instructions updated to use this repository.
 
 ---
 
@@ -46,7 +42,7 @@ The script will:
 ### Step 3: Build LibreOffice (1-3 hours)
 
 ```bash
-cd ~/dev/officelabs-master/officelabs-core
+cd ~/dev/officelabs-master/Libreoffice-fork
 
 # Configure
 ./autogen.sh --with-vendor="OfficeLabs" --enable-python=system --without-java --enable-ccache
