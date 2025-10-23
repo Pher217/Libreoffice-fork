@@ -39,7 +39,7 @@ OfficeLabs is built as a **two-layer system**:
 - **Git Integration** - Automatic versioning for all documents
 
 ### Layer 2: Agent Service (Python Backend)
-**Repository:** [officelabs-agent](https://github.com/Pher217/officelabs-agent)
+**Repository:** [officelabs-agent](https://github.com/Pher217/officelabs-agent) this is the master agent and all sub agent for example macro agent
 
 - **Writer Agent** - Content generation, editing, structuring
 - **Calc Agent** - Formula generation, data modeling, charts
