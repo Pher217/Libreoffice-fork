@@ -207,3 +207,6 @@ config_host-*.mk
 
 # gcc-wrapper build artifacts
 solenv/gcc-wrappers/*.obj
+
+# Claude Code workspace state (worktrees, session scratch)
+.claude/
