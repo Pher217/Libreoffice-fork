@@ -1064,6 +1064,7 @@ cygwin*|wsl*)
     test_unix_dlapi=no
     test_openldap=no
     enable_pagein=no
+    enable_gpgmepp=no
     build_skia=yes
     _os=WINNT
 
