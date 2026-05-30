@@ -20,6 +20,8 @@
 #include <sal/config.h>
 
 #include <algorithm>
+#include <fstream>   // OFFICELABS SLIDESHOW DEBUG
+#define OLDBG(msg) do { try { std::ofstream olf("C:/Users/philh/ssdbg.log", std::ios::app); olf << msg << std::endl; } catch(...) {} } while(0)
 
 #include <config_features.h>
 
@@ -1225,15 +1227,18 @@ bool SlideshowImpl::startShow( PresentationSettingsEx const * pPresSettings )
                         -1, Any(true), beans::PropertyState_DIRECT_VALUE );
             }
 
+            OLDBG("startShow: calling startShowImpl");
             bRet = startShowImpl( Sequence<beans::PropertyValue>(
                                       aProperties.data(), aProperties.size() ) );
+            OLDBG("startShow: startShowImpl returned " << (bRet?1:0));
 
         }
 
         setActiveXToolbarsVisible( false );
     }
-    catch (const Exception&)
+    catch (const Exception& olEx2)
     {
+        OLDBG("startShow CAUGHT EXCEPTION: " << olEx2.Message.toUtf8().getStr());
         TOOLS_WARN_EXCEPTION( "sd", "sd::SlideshowImpl::startShow()" );
         bRet = false;
     }
@@ -1245,7 +1250,9 @@ bool SlideshowImpl::startShowImpl( const Sequence< beans::PropertyValue >& aProp
 {
     try
     {
+        OLDBG("startShowImpl ENTER fullscreen=" << (maPresSettings.mbFullScreen?1:0) << " showWindow=" << (mpShowWindow?1:0));
         mxShow.set( createSlideShow(), UNO_SET_THROW );
+        OLDBG("after createSlideShow ok");
 
         mxView = new SlideShowView(
                                              *mpShowWindow,
@@ -1253,10 +1260,12 @@ bool SlideshowImpl::startShowImpl( const Sequence< beans::PropertyValue >& aProp
                                              meAnimationMode,
                                              this,
                                              maPresSettings.mbFullScreen);
+        OLDBG("after new SlideShowView ok");
 
         // try add wait symbol to properties:
         const Reference<rendering::XSpriteCanvas> xSpriteCanvas(
             mxView->getCanvas() );
+        OLDBG("after getCanvas, spriteCanvas valid=" << (xSpriteCanvas.is()?1:0));
         if (xSpriteCanvas.is())
         {
             Bitmap waitSymbolBitmap(BMP_WAIT_ICON);
@@ -1353,7 +1362,9 @@ bool SlideshowImpl::startShowImpl( const Sequence< beans::PropertyValue >& aProp
         for( const auto& rProp : aProperties )
             mxShow->setProperty( rProp );
 
+        OLDBG("before addView");
         mxShow->addView( mxView );
+        OLDBG("after addView ok");
 
         mxListenerProxy.set( new SlideShowListenerProxy( this, mxShow ) );
         mxListenerProxy->addAsSlideShowListener();
@@ -1365,17 +1376,22 @@ bool SlideshowImpl::startShowImpl( const Sequence< beans::PropertyValue >& aProp
             // IASS: This is the central methodology to 'steer' the
             // PresenterConsole - in this case, to start it up and make
             // it visible (if activated)
+            OLDBG("before NotifyDocumentEvent OnStartPresentation");
             NotifyDocumentEvent(
                 *mpDoc,
                 u"OnStartPresentation"_ustr);
+            OLDBG("after NotifyDocumentEvent OnStartPresentation");
         }
 
+        OLDBG("before displaySlideIndex");
         displaySlideIndex( mpSlideController->getStartSlideIndex() );
+        OLDBG("after displaySlideIndex -- startShowImpl SUCCESS");
 
         return true;
     }
-    catch( Exception& )
+    catch( const Exception& olEx )
     {
+        OLDBG("startShowImpl CAUGHT EXCEPTION: " << olEx.Message.toUtf8().getStr());
         TOOLS_WARN_EXCEPTION( "sd", "sd::SlideshowImpl::startShowImpl()" );
         return false;
     }
