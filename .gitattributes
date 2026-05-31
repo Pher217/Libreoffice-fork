@@ -11,3 +11,11 @@
 *.odt binary
 *.rtf diff
 schema/*/* export-ignore
+
+# Bug 38: gbuild's optional-implementation filter (solenv/gbuild/ComponentTarget.mk)
+# compares the .component.<impl> COMPONENTIMPL lists with `sort | uniq -u`. A CRLF
+# working-tree copy of these files fails to cancel the LF xsltproc-generated .optionals,
+# so <optional/> UNO implementations (e.g. com.sun.star.comp.Draw.GraphicExporter) get
+# silently stripped from services.rdb and the service is unavailable at runtime. Force
+# LF so a Windows checkout cannot reintroduce the defect.
+*.component.* text eol=lf
