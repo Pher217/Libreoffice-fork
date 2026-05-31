@@ -243,6 +243,15 @@ LRESULT CALLBACK WebViewPanel::FrameSubclassProc(
                              SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             }
         }
+        else if (wActivate == WA_INACTIVE)
+        {
+            // Frame lost activation — e.g. a fullscreen slideshow window just
+            // took the foreground. Re-sync ALL panels now (mirrors the WA_ACTIVE
+            // broadcast) so every popup hides immediately via the fullscreen
+            // guard in syncCefWindowSize, instead of waiting for its timer.
+            for (auto* p : s_allPanels)
+                p->syncCefWindowSize();
+        }
         return result;
     }
 
@@ -280,13 +289,12 @@ LRESULT CALLBACK WebViewPanel::FrameSubclassProc(
     case WM_EXITMENULOOP:
     case WM_UNINITMENUPOPUP:
     {
-        // Menu closed — restore CEF to top of Z-order.
-        if (pPanel && pPanel->m_hCefParentWnd)
-        {
-            SetWindowPos(pPanel->m_hCefParentWnd, HWND_TOP,
-                         0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
+        // Menu closed — re-sync instead of a raw HWND_TOP raise. syncCefWindowSize
+        // restores the popup to top normally, BUT its fullscreen guard keeps it
+        // hidden if a slideshow is up (e.g. Slide Show menu → Start Presentation,
+        // where the show window appears right after the menu closes).
+        if (pPanel)
+            pPanel->syncCefWindowSize();
         return DefSubclassProc(hWnd, uMsg, wParam, lParam);
     }
 
@@ -857,6 +865,38 @@ void WebViewPanel::syncCefWindowSize()
     bool bShouldShow = bSidebarVisible && !bFrameMinimized;
 
     bool bIsShown = IsWindowVisible(m_hCefParentWnd);
+
+    // --- Fullscreen-window guard (e.g. Impress slideshow) ---
+    // The CEF sidebar popup is a separate top-level window. The z-order logic
+    // below keeps it on top of our frame, which would also place it OVER a
+    // fullscreen presentation (started via F5 / Slide Show), hiding the show.
+    // If a fullscreen window other than ours holds the foreground, hide the
+    // popup. It is restored when the frame regains foreground (Esc / show end),
+    // which re-runs this sync via WM_ACTIVATE.
+    if (hFg && hFg != m_hCefParentWnd && hFg != m_hFrameWnd)
+    {
+        RECT rcFg{};
+        HMONITOR hMon = MonitorFromWindow(hFg, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(MONITORINFO);
+        // A fullscreen slideshow is a BORDERLESS (no WS_CAPTION) top-level
+        // window covering the whole monitor. Requiring "no caption" excludes
+        // ordinary MAXIMIZED windows (which keep their caption and cover only
+        // the work area), so we don't hide the popup for those. A small edge
+        // tolerance absorbs DPI/rounding insets.
+        constexpr LONG kEdge = 2;
+        if (GetWindowRect(hFg, &rcFg) && GetMonitorInfo(hMon, &mi)
+            && !(GetWindowLong(hFg, GWL_STYLE) & WS_CAPTION)
+            && rcFg.left   <= mi.rcMonitor.left   + kEdge
+            && rcFg.top    <= mi.rcMonitor.top    + kEdge
+            && rcFg.right  >= mi.rcMonitor.right  - kEdge
+            && rcFg.bottom >= mi.rcMonitor.bottom - kEdge)
+        {
+            if (bIsShown)
+                ShowWindow(m_hCefParentWnd, SW_HIDE);
+            return;
+        }
+    }
 
     // GRACE PERIOD after reattach (same as before — handles OLE activation).
     if (m_nReattachGraceTicks > 0)
