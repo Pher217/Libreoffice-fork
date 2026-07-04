@@ -114,7 +114,7 @@
     <!-- Radio Buttons                                                 -->
     <!-- ============================================================ -->
     <radiobutton>
-        <part value="Entire" width="20" height="20">
+        <part value="Entire" width="16" height="16">
            <state enabled="true" pressed="false" button-value="true">
                 <image source="tick-on.svg" />
             </state>
@@ -145,7 +145,7 @@
     <!-- Checkboxes (Toggle switches)                                  -->
     <!-- ============================================================ -->
     <checkbox>
-        <part value="Entire" width="36" height="24">
+        <part value="Entire" width="26" height="18">
            <state enabled="true" pressed="false" button-value="true">
                 <image source="switch-on.svg" />
             </state>

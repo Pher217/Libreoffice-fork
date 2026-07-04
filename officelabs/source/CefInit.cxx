@@ -26,8 +26,46 @@
 #include <osl/module.hxx>
 #include <rtl/bootstrap.hxx>
 
+#include <com/sun/star/frame/Desktop.hpp>
+#include <com/sun/star/frame/XDesktop2.hpp>
+#include <com/sun/star/frame/XTerminateListener.hpp>
+#include <com/sun/star/lang/EventObject.hpp>
+#include <com/sun/star/uno/Reference.hxx>
+#include <com/sun/star/uno/XComponentContext.hpp>
+#include <comphelper/processfactory.hxx>
+#include <cppuhelper/implbase.hxx>
+
 #include <cstdlib>
 #include <string>
+
+namespace {
+
+// Drives CefShutdown() on the main thread during normal LibreOffice
+// termination. CEF is initialized with multi_threaded_message_loop = true,
+// so CefShutdown() must run on the thread that called CefInitialize, while
+// the process is still alive. Leaving it to the CefInit static destructor
+// runs it during CRT teardown after main() returns, racing CEF's worker
+// threads and firing the libcef int3 (BREAKPOINT_80000003) on close. This
+// listener fires synchronously on the main thread from Desktop::terminate(),
+// before static destruction. The static-dtor shutdown() stays as an
+// idempotent fallback (guarded by m_bInitialized).
+class CefTerminateListener
+    : public cppu::WeakImplHelper<css::frame::XTerminateListener>
+{
+public:
+    // XTerminateListener — never veto termination
+    void SAL_CALL queryTermination(const css::lang::EventObject&) override {}
+
+    void SAL_CALL notifyTermination(const css::lang::EventObject&) override
+    {
+        officelabs::CefInit::instance().shutdown();
+    }
+
+    // XEventListener
+    void SAL_CALL disposing(const css::lang::EventObject&) override {}
+};
+
+} // anonymous namespace
 
 namespace officelabs {
 
@@ -110,6 +148,31 @@ bool CefInit::initialize()
 
     m_bInitialized = true;
     SAL_INFO("officelabs.cef", "CEF initialized successfully (debug port 9222)");
+
+    // Register a terminate listener so CefShutdown() runs on the main thread
+    // during normal LO termination, before static destructors (see comment on
+    // CefTerminateListener). Runs once — initialize() early-returns when
+    // already initialized.
+    try
+    {
+        css::uno::Reference<css::uno::XComponentContext> xContext(
+            ::comphelper::getProcessComponentContext());
+        if (xContext.is())
+        {
+            css::uno::Reference<css::frame::XDesktop2> xDesktop(
+                css::frame::Desktop::create(xContext));
+            xDesktop->addTerminateListener(new CefTerminateListener());
+            SAL_INFO("officelabs.cef", "Registered CEF terminate listener");
+        }
+    }
+    catch (const css::uno::Exception&)
+    {
+        // Non-fatal: fall back to the static-destructor shutdown() path.
+        SAL_WARN("officelabs.cef",
+                 "Failed to register CEF terminate listener; CefShutdown will "
+                 "fall back to static destructor");
+    }
+
     return true;
 }
 
