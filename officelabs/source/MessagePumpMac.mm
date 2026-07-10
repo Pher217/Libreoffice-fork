@@ -17,8 +17,62 @@
 #ifdef HAVE_FEATURE_CEF
 #ifdef MACOSX
 
-#include <dispatch/dispatch.h>
+#include <CoreFoundation/CoreFoundation.h>
 #include <cstdint>
+
+/*
+ * WHY CFRunLoop AND NOT GCD (dispatch_get_main_queue):
+ *
+ * LibreOffice's VCL runs the whole application inside a NESTED run loop:
+ * [NSApp run] -> sendEvent: -> handleAppDefinedEvent -> Desktop::Main ->
+ * Application::Yield -> nextEventMatchingMask (proof: `sample soffice` main
+ * thread stack). CoreFoundation only drains the GCD main queue at the
+ * OUTERMOST run-loop invocation, so dispatch_async/dispatch_after blocks
+ * queued to the main queue NEVER execute in LibreOffice -> the CEF pump
+ * never ran -> browser UI-thread tasks never processed -> helper processes
+ * timed out after 15s with no Mojo connection -> white sidebar panel.
+ *
+ * CFRunLoopPerformBlock + CFRunLoopWakeUp and CFRunLoopTimer registered in
+ * kCFRunLoopCommonModes ARE serviced by nested run-loop invocations, so the
+ * pump fires regardless of VCL's nesting. Both are documented thread-safe
+ * to call from any thread (CEF calls OnScheduleMessagePumpWork from
+ * arbitrary threads).
+ */
+namespace {
+// Repeating heartbeat timer. CEF's on-demand OnScheduleMessagePumpWork
+// contract proved fragile under LibreOffice's nested run loop (observed:
+// exactly one schedule request during CefInitialize, then silence while
+// browser-creation work was clearly pending -> renderers starved at 15s).
+// A 30Hz CefDoMessageLoopWork heartbeat is the standard embedder fallback;
+// an idle pump iteration is near-free.
+CFRunLoopTimerRef g_pHeartbeatTimer = nullptr;
+}
+
+extern "C" void officelabs_start_pump_heartbeat(int64_t interval_ms,
+                                                void (*fn)())
+{
+    if (fn == nullptr || g_pHeartbeatTimer != nullptr)
+        return;
+
+    const double interval = static_cast<double>(interval_ms) / 1000.0;
+    g_pHeartbeatTimer = CFRunLoopTimerCreateWithHandler(
+        kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + interval, interval,
+        0, 0,
+        ^(CFRunLoopTimerRef) {
+            fn();
+        });
+    CFRunLoopAddTimer(CFRunLoopGetMain(), g_pHeartbeatTimer,
+                      kCFRunLoopCommonModes);
+}
+
+extern "C" void officelabs_stop_pump_heartbeat()
+{
+    if (g_pHeartbeatTimer == nullptr)
+        return;
+    CFRunLoopTimerInvalidate(g_pHeartbeatTimer);
+    CFRelease(g_pHeartbeatTimer);
+    g_pHeartbeatTimer = nullptr;
+}
 
 extern "C" void officelabs_schedule_pump_on_main(int64_t delay_ms,
                                                  void (*fn)())
@@ -26,21 +80,29 @@ extern "C" void officelabs_schedule_pump_on_main(int64_t delay_ms,
     if (fn == nullptr)
         return;
 
+    CFRunLoopRef mainLoop = CFRunLoopGetMain();
+
     if (delay_ms <= 0)
     {
-        // Pump as soon as the main queue is free.
-        dispatch_async(dispatch_get_main_queue(), ^{
+        // Pump on the next main run-loop pass (nested-loop safe).
+        CFRunLoopPerformBlock(mainLoop, kCFRunLoopCommonModes, ^{
             fn();
         });
+        CFRunLoopWakeUp(mainLoop);
     }
     else
     {
-        // Pump after the requested delay.
-        const dispatch_time_t when =
-            dispatch_time(DISPATCH_TIME_NOW, delay_ms * NSEC_PER_MSEC);
-        dispatch_after(when, dispatch_get_main_queue(), ^{
-            fn();
-        });
+        // One-shot timer (interval 0 auto-invalidates after firing); the
+        // run loop retains it, so release our reference after adding.
+        const CFAbsoluteTime fireAt =
+            CFAbsoluteTimeGetCurrent() + static_cast<double>(delay_ms) / 1000.0;
+        CFRunLoopTimerRef timer = CFRunLoopTimerCreateWithHandler(
+            kCFAllocatorDefault, fireAt, 0, 0, 0,
+            ^(CFRunLoopTimerRef) {
+                fn();
+            });
+        CFRunLoopAddTimer(mainLoop, timer, kCFRunLoopCommonModes);
+        CFRelease(timer);
     }
 }
 

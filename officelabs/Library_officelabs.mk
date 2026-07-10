@@ -63,6 +63,7 @@ $(eval $(call gb_Library_add_libs,officelabs,\
 $(eval $(call gb_Library_use_system_darwin_frameworks,officelabs,\
     AppKit \
     Cocoa \
+    CoreFoundation \
     IOSurface \
 ))
 else

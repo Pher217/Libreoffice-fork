@@ -48,7 +48,18 @@
 #include <include/wrapper/cef_library_loader.h>
 #include <optional>
 #include <sys/stat.h>
+#include <pthread.h>
+#include <dlfcn.h>
+#include <cstdio>
 #endif
+
+// officelabs.cef Phase-1 instrumentation: SAL logging is compiled out of
+// this build (ENABLE_SAL_LOG is empty in config_host.mk), so SAL_WARN/
+// SAL_INFO calls produce no output. This macro writes straight to a file
+// so a single launch reveals exactly where mac CEF init fails. Remove once
+// the blank-panel root cause is fixed.
+#define OLCEF_LOG(...) \
+    do { FILE* f = fopen("/tmp/olcef.log", "a"); if (f) { fprintf(f, __VA_ARGS__); fclose(f); } } while (0)
 
 namespace {
 
@@ -106,6 +117,9 @@ CefInit::~CefInit()
 
 bool CefInit::initialize()
 {
+#ifdef MACOSX
+    OLCEF_LOG("initialize() reached, mainThread=%d\n", pthread_main_np());
+#endif
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_bInitialized)
         return true;
@@ -120,6 +134,7 @@ bool CefInit::initialize()
         {
             SAL_WARN("officelabs.cef",
                      "CefScopedLibraryLoader::LoadInMain() FAILED");
+            OLCEF_LOG("LoadInMain FAILED: %s\n", dlerror());
             g_oLibraryLoader.reset();
             return false;
         }
@@ -161,6 +176,15 @@ bool CefInit::initialize()
     OUString subprocessPath = getSubprocessPath();
     OString utf8Path = OUStringToOString(subprocessPath, RTL_TEXTENCODING_UTF8);
     CefString(&settings.browser_subprocess_path).FromASCII(utf8Path.getStr());
+
+#ifdef MACOSX
+    {
+        struct stat sSubprocessStat;
+        bool bSubprocessExists = (::stat(utf8Path.getStr(), &sSubprocessStat) == 0);
+        OLCEF_LOG("subprocess path = %s (%s)\n", utf8Path.getStr(),
+                  bSubprocessExists ? "EXISTS" : "MISSING");
+    }
+#endif
 
     // Persistent cache — enables localStorage across CEF browser restarts.
     // Without this, CEF runs in "incognito mode" and localStorage is lost
@@ -212,8 +236,12 @@ bool CefInit::initialize()
 #endif
 
     // Log settings
-    settings.log_severity = LOGSEVERITY_INFO;
-    CefString(&settings.log_file).FromASCII("officelabs_cef.log");
+    // officelabs.cef Phase-1 instrumentation: the previous relative path
+    // was silently unwritable (GUI app bundles run with cwd "/"), so
+    // Chromium's own init log - the best explainer of init failures - was
+    // never produced. Use an absolute path and verbose severity instead.
+    settings.log_severity = LOGSEVERITY_VERBOSE;
+    CefString(&settings.log_file).FromASCII("/tmp/officelabs_cef_debug.log");
 
     SAL_INFO("officelabs.cef", "Initializing CEF with subprocess: " << utf8Path);
 
@@ -225,7 +253,15 @@ bool CefInit::initialize()
     browserApp = new OfficelabsBrowserApp();
 #endif
 
-    if (!CefInitialize(main_args, settings, browserApp, nullptr))
+#ifdef MACOSX
+    OLCEF_LOG("calling CefInitialize\n");
+#endif
+    bool bCefInitOk = CefInitialize(main_args, settings, browserApp, nullptr);
+#ifdef MACOSX
+    OLCEF_LOG("CefInitialize returned %d, exit=%d\n", (int)bCefInitOk,
+              (int)CefGetExitCode());
+#endif
+    if (!bCefInitOk)
     {
         SAL_WARN("officelabs.cef", "CefInitialize() FAILED");
         return false;
@@ -233,6 +269,13 @@ bool CefInit::initialize()
 
     m_bInitialized = true;
     SAL_INFO("officelabs.cef", "CEF initialized successfully (debug port 9222)");
+
+#ifdef MACOSX
+    // Drive CEF with a 30Hz heartbeat. The pure on-demand external pump
+    // (OnScheduleMessagePumpWork) proved unreliable under VCL's nested run
+    // loop; see OfficelabsBrowserApp.cxx / MessagePumpMac.mm.
+    StartCefPumpHeartbeat();
+#endif
 
     // Register a terminate listener so CefShutdown() runs on the main thread
     // during normal LO termination, before static destructors (see comment on
@@ -274,6 +317,11 @@ void CefInit::shutdown()
     // is still alive, otherwise their destructors touch freed CEF state.
     WebViewPanel::cleanupPersistentBrowser();
 
+#ifdef MACOSX
+    // Stop the heartbeat BEFORE CefShutdown so no CefDoMessageLoopWork can
+    // fire against a torn-down CEF.
+    StopCefPumpHeartbeat();
+#endif
     CefShutdown();
     m_bInitialized = false;
     SAL_INFO("officelabs.cef", "CEF shutdown complete");

@@ -27,6 +27,7 @@
 
 #include <include/cef_app.h>
 #include <include/cef_browser_process_handler.h>
+#include <include/cef_command_line.h>
 
 namespace officelabs {
 
@@ -47,6 +48,27 @@ public:
         return this;
     }
 
+    // macOS: skip the OS Keychain for Chromium's os_crypt "Safe Storage" key.
+    // Every dev rebuild re-signs the app with a fresh ad-hoc identity, so the
+    // Keychain ACL never matches and securityd stalls on consent while a
+    // second CEF thread holds the legacy-keychain mutex -> CefInitialize
+    // deadlocks on the main thread (observed 2026-07-10: main thread in
+    // SecKeychainSearchCopyNext under cef_initialize, second thread in
+    // ClientSession::decrypt). The sidebar stores no OS-encrypted secrets, so
+    // the mock keychain is correct here, not just expedient.
+    void OnBeforeCommandLineProcessing(
+        const CefString& process_type,
+        CefRefPtr<CefCommandLine> command_line) override
+    {
+#ifdef MACOSX
+        if (process_type.empty())
+            command_line->AppendSwitch("use-mock-keychain");
+#else
+        (void)process_type;
+        (void)command_line;
+#endif
+    }
+
     // CefBrowserProcessHandler
     // Called by CEF (external_message_pump mode) to request that CEF work be
     // pumped after |delay_ms| milliseconds. Implemented in
@@ -57,6 +79,12 @@ public:
 private:
     IMPLEMENT_REFCOUNTING(OfficelabsBrowserApp);
 };
+
+// Start/stop the 30Hz CefDoMessageLoopWork heartbeat (mac only; no-op
+// elsewhere). Call Start after a successful CefInitialize() and Stop before
+// CefShutdown(), both on the main thread.
+void StartCefPumpHeartbeat();
+void StopCefPumpHeartbeat();
 
 } // namespace officelabs
 

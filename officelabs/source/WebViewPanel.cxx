@@ -73,6 +73,7 @@
 #include <include/cef_keyboard_handler.h>
 
 #include <functional>
+#include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <vector>
@@ -147,7 +148,8 @@ namespace officelabs {
 class WebViewCefClient final : public CefClient,
                                 public CefLifeSpanHandler,
                                 public CefRequestHandler,
-                                public CefKeyboardHandler
+                                public CefKeyboardHandler,
+                                public CefDisplayHandler
 {
 public:
     WebViewCefClient(WebViewPanel* pPanel,
@@ -167,6 +169,20 @@ public:
     CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
     CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
     CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
+    CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
+
+    bool OnConsoleMessage(CefRefPtr<CefBrowser>, cef_log_severity_t level,
+                          const CefString& message, const CefString& source, int line) override
+    {
+        FILE* f = fopen("/tmp/olcef.log", "a");
+        if (f) {
+            std::string m = message.ToString();
+            std::string s = source.ToString();
+            fprintf(f, "JS console [%d] %s (%s:%d)\n", (int)level, m.c_str(), s.c_str(), line);
+            fclose(f);
+        }
+        return false;
+    }
 
     // CefKeyboardHandler — intercept LO-bound hotkeys before CEF handles them.
     // When the AI sidebar has keyboard focus (user clicked into the chat input),
@@ -314,6 +330,11 @@ WebViewPanel::WebViewPanel(weld::Widget* pParent, SfxBindings* pBindings)
     : PanelLayout(pParent, u"WebViewPanel"_ustr, u"officelabs/ui/webviewpanel.ui"_ustr)
     , m_pBindings(pBindings)
 {
+    // officelabs.cef Phase-1 instrumentation (SAL logging is compiled out of
+    // this build - ENABLE_SAL_LOG is empty - so this writes directly to a
+    // file). Confirms whether the ctor runs at all before CEF init.
+    { FILE* f = fopen("/tmp/olcef.log", "a"); if (f) { fprintf(f, "WebViewPanel ctor\n"); fclose(f); } }
+
     SAL_INFO("officelabs.cef", "WebViewPanel created, active frames="
              << s_perFrameState.size());
 
