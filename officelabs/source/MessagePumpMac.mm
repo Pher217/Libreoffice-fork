@@ -3,15 +3,16 @@
  * OfficeLabs CEF message-pump shim for macOS.
  *
  * Bridges CefBrowserProcessHandler::OnScheduleMessagePumpWork() (plain C++ in
- * OfficelabsBrowserApp.cxx) to Grand Central Dispatch on the AppKit main
- * thread. Kept in its own Objective-C++ (.mm) translation unit so that the
- * CefApp implementation stays platform-neutral C++.
+ * OfficelabsBrowserApp.cxx) to the AppKit main-thread CFRunLoop. Kept in its
+ * own Objective-C++ (.mm) translation unit so that the CefApp implementation
+ * stays platform-neutral C++.
  *
  * The scheduled callback |fn| is CefDoMessageLoopWork() (wrapped by a small
  * static in OfficelabsBrowserApp.cxx that clears the coalescing flag first).
- * Running it on the main queue guarantees it executes on the same thread that
- * called CefInitialize() — CEF's UI thread and LibreOffice's VCL main thread
- * are both the AppKit main thread on mac.
+ * Scheduling via CFRunLoop (not the libdispatch main queue) guarantees it runs
+ * even inside VCL's nested run loop, on the same thread that called
+ * CefInitialize() — CEF's UI thread and LibreOffice's VCL main thread are both
+ * the AppKit main thread on mac. See the block comment below for why GCD fails.
  */
 
 #ifdef HAVE_FEATURE_CEF
@@ -61,6 +62,8 @@ extern "C" void officelabs_start_pump_heartbeat(int64_t interval_ms,
         ^(CFRunLoopTimerRef) {
             fn();
         });
+    if (g_pHeartbeatTimer == nullptr)
+        return;
     CFRunLoopAddTimer(CFRunLoopGetMain(), g_pHeartbeatTimer,
                       kCFRunLoopCommonModes);
 }
@@ -101,6 +104,14 @@ extern "C" void officelabs_schedule_pump_on_main(int64_t delay_ms,
             ^(CFRunLoopTimerRef) {
                 fn();
             });
+        if (timer == nullptr)
+        {
+            // Allocation failed; fall back to an immediate perform-block so the
+            // pump is not lost entirely.
+            CFRunLoopPerformBlock(mainLoop, kCFRunLoopCommonModes, ^{ fn(); });
+            CFRunLoopWakeUp(mainLoop);
+            return;
+        }
         CFRunLoopAddTimer(mainLoop, timer, kCFRunLoopCommonModes);
         CFRelease(timer);
     }
