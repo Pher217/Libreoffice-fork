@@ -3214,7 +3214,25 @@ CEF_DIR=
 CEF_CFLAGS=
 CEF_LIBS=
 if test "$with_cef" != "no" -a -n "$with_cef"; then
-    if test -d "$with_cef/include" -a -d "$with_cef/Release"; then
+    if test "$_os" = Darwin; then
+        dnl macOS CEF binary distribution shape: include/, the framework under
+        dnl Release/, and libcef_dll/ wrapper sources (compiled into
+        dnl libcef_dll_wrapper.a by the CEF build step). On macOS the framework
+        dnl is loaded at runtime via CefScopedLibraryLoader, so it is NOT linked
+        dnl at link time; link-time we only need the wrapper static lib (added in
+        dnl Library_officelabs.mk / Executable_officelabs_cef_subprocess.mk) plus
+        dnl the standard AppKit/Cocoa/IOSurface frameworks. CEF_LIBS is therefore
+        dnl empty here (no import lib like the Windows libcef.lib).
+        if test -d "$with_cef/include" -a -d "$with_cef/Release/Chromium Embedded Framework.framework" -a -d "$with_cef/libcef_dll"; then
+            ENABLE_CEF=TRUE
+            CEF_DIR="$with_cef"
+            CEF_CFLAGS="-I$with_cef -I$with_cef/include"
+            CEF_LIBS=
+            AC_MSG_RESULT([using macOS CEF from $with_cef])
+        else
+            AC_MSG_ERROR([macOS CEF directory $with_cef does not contain expected structure ("include/", "Release/Chromium Embedded Framework.framework" and "libcef_dll/" required)])
+        fi
+    elif test -d "$with_cef/include" -a -d "$with_cef/Release"; then
         ENABLE_CEF=TRUE
         CEF_DIR="$with_cef"
         CEF_CFLAGS="-I$with_cef -I$with_cef/include"
