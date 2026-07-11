@@ -2,38 +2,50 @@
 /*
  * OfficeLabs WebView Panel Implementation
  *
- * Embeds a CEF browser inside a popup window tracked to the sidebar.
- * The browser loads a React chat app (from Vite dev server or bundled files).
+ * Embeds a CEF browser inside a native host window/view tracked to the
+ * sidebar. The browser loads a React chat app (from Vite dev server or
+ * bundled files).
  *
  * PER-FRAME BROWSER ARCHITECTURE
  * --------------------------------
  * Each LibreOffice document frame (Writer, Calc, Impress, ...) gets its
- * OWN independent CEF browser + popup window.  State is kept in a
- * std::map<HWND, PerFrameCefState> keyed by the LO frame HWND.
+ * OWN independent CEF browser + native host window/view.  State is kept in
+ * a std::map<NativeWindowHandle, PerFrameCefState> keyed by the LO frame's
+ * native handle (HWND on Windows, NSView* on macOS).
  *
  * BROWSER PERSISTENCE (within a frame)
  * -------------------------------------
- * The CEF browser, popup HWND, message router, and client for a frame live in
- * PerFrameCefState and survive panel destruction/recreation within that frame.
- * This handles OLE in-place activation (charts, equations) which temporarily
- * destroys and recreates the sidebar panel.
+ * The CEF browser, native host, message router, and client for a frame live
+ * in PerFrameCefState and survive panel destruction/recreation within that
+ * frame.  This handles OLE in-place activation (charts, equations) which
+ * temporarily destroys and recreates the sidebar panel.
  *
- * When the sidebar destroys the panel for a frame, the destructor only hides
- * the popup and nulls the handler's panel pointer.  When the sidebar recreates
- * the panel for the same frame, the constructor reattaches to the existing
- * browser — no page reload, no localStorage loss.
+ * When the sidebar destroys the panel for a frame, the destructor only
+ * detaches the handler/client/host from this panel instance (rebinding
+ * their panel pointer to null).  When the sidebar recreates the panel for
+ * the same frame, the constructor reattaches to the existing browser — no
+ * page reload, no localStorage loss.
  *
  * VISIBILITY MANAGEMENT
  * ----------------------
- * syncCefWindowSize() shows a frame's popup ONLY when that frame is the
- * foreground window.  Non-active frames' popups are automatically hidden.
- * When a frame is activated (WM_ACTIVATE), all live panels are sync'd
- * immediately so the transition is instant.
+ * syncCefWindowSize() asks the native host to show itself only when VCL
+ * considers the sidebar visible; the host itself applies additional native
+ * gating (frame active/minimized, fullscreen guard) before actually
+ * showing.  When a frame is activated, the host broadcasts a sync to all
+ * live panels immediately so the transition is instant.
+ *
+ * PLATFORM ISOLATION (mac port, Decision 5)
+ * -------------------------------------------
+ * This file contains NO raw native window calls (no HWND, no Cocoa). All
+ * native window operations go through INativeCefHost — see
+ * officelabs/INativeCefHost.hxx, WebViewPanelHostWin.cxx (Windows),
+ * WebViewPanelHostMac.mm (macOS).
  */
 
 #ifdef HAVE_FEATURE_CEF
 
 #include <officelabs/WebViewPanel.hxx>
+#include <officelabs/INativeCefHost.hxx>
 #include <officelabs/CefInit.hxx>
 #include <officelabs/WebViewMessageHandler.hxx>
 #include <officelabs/DocumentController.hxx>
@@ -61,24 +73,27 @@
 #include <include/cef_keyboard_handler.h>
 
 #include <functional>
+#include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <vector>
 #include <algorithm>
 
 // ============================================================
-// Per-frame CEF state — one entry per LO document frame HWND
+// Per-frame CEF state — one entry per LO document frame handle
 // ============================================================
 namespace {
 
 /// State that belongs to a single document frame (Writer/Calc/Impress window).
 /// Created when the AI panel is first opened in that frame.
 /// Survives panel destroy/recreate within the same frame (e.g. OLE activation).
-/// Destroyed (popup auto-destroyed by Windows) when the frame HWND is destroyed.
+/// Destroyed when the frame's native handle is destroyed (native host
+/// observes this and calls WebViewPanel::eraseFrameState()), or explicitly
+/// via WebViewPanel::cleanupPersistentBrowser() at CEF shutdown.
 struct PerFrameCefState
 {
     CefRefPtr<CefBrowser>                        browser;
-    HWND                                         hCefParentWnd = nullptr;
+    std::unique_ptr<officelabs::INativeCefHost>  host;
     CefRefPtr<CefMessageRouterBrowserSide>       messageRouter;
     std::unique_ptr<officelabs::WebViewMessageHandler> messageHandler;
     CefRefPtr<CefClient>                         client;
@@ -86,11 +101,11 @@ struct PerFrameCefState
     bool                                         browserCreated = false;
 };
 
-/// All per-frame state, keyed by LO frame HWND.
-static std::map<HWND, PerFrameCefState> s_perFrameState;
+/// All per-frame state, keyed by the LO frame's native handle.
+static std::map<officelabs::NativeWindowHandle, PerFrameCefState> s_perFrameState;
 
 /// All currently alive WebViewPanel instances.
-/// Used to broadcast syncCefWindowSize() to all panels on WM_ACTIVATE.
+/// Used to broadcast syncCefWindowSize() to all panels on frame activation.
 static std::vector<officelabs::WebViewPanel*> s_allPanels;
 
 } // anonymous namespace
@@ -99,6 +114,15 @@ static std::vector<officelabs::WebViewPanel*> s_allPanels;
 // Helpers
 // ============================================================
 namespace {
+
+// CEF normalizes CefKeyEvent::windows_key_code to the Windows VK_* numbering
+// on EVERY platform (a CEF convention, not a Windows-only artifact -- see
+// include/internal/cef_types.h). These two are defined locally, as plain
+// portable integers, so this cross-platform file does not need <windows.h>
+// (which is excluded on mac by WebViewPanel.hxx's #ifdef _WIN32 guard) just
+// to name them.
+constexpr int kVkF5 = 0x74;      // VK_F5
+constexpr int kVkEscape = 0x1B;  // VK_ESCAPE
 
 // Helper: invoke a std::function on VCL thread via PostUserEvent
 void VclDispatchCb(void* pData, void*)
@@ -114,229 +138,9 @@ void postToVclThread(std::function<void()> fn)
     Application::PostUserEvent(LINK_NONMEMBER(pData, VclDispatchCb));
 }
 
-// WndProc for the "OfficeLabsCefHost" window class.
-// Unlike "Static", this class has no background brush and suppresses
-// WM_ERASEBKGND. This prevents the black flash when Windows invalidates
-// the popup during focus transitions between CEF and the document.
-LRESULT CALLBACK CefHostWndProc(HWND hWnd, UINT uMsg,
-                                WPARAM wParam, LPARAM lParam)
-{
-    switch (uMsg)
-    {
-    case WM_ERASEBKGND:
-        // Do NOT erase the background. CEF paints the entire client area.
-        // Returning 1 tells Windows "I handled it" so it won't paint a
-        // default background (which causes the black flash).
-        return 1;
-
-    case WM_PAINT:
-    {
-        // Validate the dirty region without drawing anything.
-        // Without BeginPaint/EndPaint, Windows would keep sending WM_PAINT.
-        PAINTSTRUCT ps;
-        BeginPaint(hWnd, &ps);
-        EndPaint(hWnd, &ps);
-        return 0;
-    }
-
-    case WM_NCHITTEST:
-        // The popup should never receive mouse input itself --
-        // all input goes to the CEF child HWND inside it.
-        return HTTRANSPARENT;
-
-    case WM_ACTIVATE:
-        // Suppress activation processing. During OLE in-place activation
-        // (charts, equations), Windows sends WM_ACTIVATE to owned popups.
-        // If DefWindowProc processes this, CEF interferes with the OLE
-        // operation and crashes LibreOffice. Return 0 = "handled".
-        return 0;
-
-    case WM_NCACTIVATE:
-        // Same rationale: suppress non-client activation visual updates.
-        // Return TRUE to accept the state change without visual update.
-        return TRUE;
-
-    default:
-        return DefWindowProc(hWnd, uMsg, wParam, lParam);
-    }
-}
-
 } // anonymous namespace
 
 namespace officelabs {
-
-// Subclass ID — arbitrary unique value for our frame subclass
-static constexpr UINT_PTR CEFHOST_SUBCLASS_ID = 0x4F4C4345; // "OLCE"
-
-bool WebViewPanel::registerCefHostClass()
-{
-    static bool bRegistered = false;
-    if (bRegistered)
-        return true;
-
-    WNDCLASSEXW wc = {};
-    wc.cbSize        = sizeof(WNDCLASSEXW);
-    wc.style         = 0;
-    wc.lpfnWndProc   = CefHostWndProc;
-    wc.cbClsExtra    = 0;
-    wc.cbWndExtra    = 0;
-    wc.hInstance     = GetModuleHandle(nullptr);
-    wc.hIcon         = nullptr;
-    wc.hIconSm       = nullptr;
-    wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;   // KEY: no background brush = no flash
-    wc.lpszMenuName  = nullptr;
-    wc.lpszClassName = L"OfficeLabsCefHost";
-
-    if (!RegisterClassExW(&wc))
-    {
-        DWORD err = GetLastError();
-        if (err != ERROR_CLASS_ALREADY_EXISTS)
-        {
-            SAL_WARN("officelabs.cef",
-                     "RegisterClassExW(OfficeLabsCefHost) failed, error=" << err);
-            return false;
-        }
-    }
-
-    bRegistered = true;
-    SAL_INFO("officelabs.cef", "Registered OfficeLabsCefHost window class");
-    return true;
-}
-
-LRESULT CALLBACK WebViewPanel::FrameSubclassProc(
-    HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
-    UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
-{
-    auto* pPanel = reinterpret_cast<WebViewPanel*>(dwRefData);
-
-    switch (uMsg)
-    {
-    case WM_WINDOWPOSCHANGED:
-    {
-        // Fires on every frame move/resize, including during drag.
-        // This is the primary fix for the lag: instant position sync.
-        LRESULT result = DefSubclassProc(hWnd, uMsg, wParam, lParam);
-        if (pPanel)
-            pPanel->syncCefWindowSize();
-        return result;
-    }
-
-    case WM_ACTIVATE:
-    {
-        LRESULT result = DefSubclassProc(hWnd, uMsg, wParam, lParam);
-        WORD wActivate = LOWORD(wParam);
-        if (wActivate == WA_ACTIVE || wActivate == WA_CLICKACTIVE)
-        {
-            // This frame was activated. Immediately sync ALL live panels:
-            //   - this panel: shows its popup at this sidebar's position
-            //   - other panels: hide their popups (bFrameActive = false)
-            // This makes the transition instant instead of waiting for timer.
-            for (auto* p : s_allPanels)
-                p->syncCefWindowSize();
-
-            // Bring this panel's popup to top of Z-order.
-            if (pPanel && pPanel->m_hCefParentWnd)
-            {
-                SetWindowPos(pPanel->m_hCefParentWnd, HWND_TOP,
-                             0, 0, 0, 0,
-                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            }
-        }
-        else if (wActivate == WA_INACTIVE)
-        {
-            // Frame lost activation — e.g. a fullscreen slideshow window just
-            // took the foreground. Re-sync ALL panels now (mirrors the WA_ACTIVE
-            // broadcast) so every popup hides immediately via the fullscreen
-            // guard in syncCefWindowSize, instead of waiting for its timer.
-            for (auto* p : s_allPanels)
-                p->syncCefWindowSize();
-        }
-        return result;
-    }
-
-    case WM_NCACTIVATE:
-    {
-        // When the CEF popup takes focus, the frame gets WM_NCACTIVATE(FALSE).
-        // This dims the title bar. We want the frame to still LOOK active
-        // when the user is interacting with the sidebar (it's part of LO).
-        if (!wParam && pPanel && pPanel->m_hCefParentWnd)
-        {
-            HWND hFg = GetForegroundWindow();
-            if (hFg == pPanel->m_hCefParentWnd)
-            {
-                // Force visual "active" state on the frame
-                return DefWindowProcW(hWnd, WM_NCACTIVATE, TRUE, lParam);
-            }
-        }
-        return DefSubclassProc(hWnd, uMsg, wParam, lParam);
-    }
-
-    case WM_ENTERMENULOOP:
-    case WM_INITMENUPOPUP:
-    {
-        // A menu or popup is opening — temporarily push CEF behind so
-        // dropdown menus render on top of the AI sidebar.
-        if (pPanel && pPanel->m_hCefParentWnd)
-        {
-            SetWindowPos(pPanel->m_hCefParentWnd, HWND_BOTTOM,
-                         0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
-        return DefSubclassProc(hWnd, uMsg, wParam, lParam);
-    }
-
-    case WM_EXITMENULOOP:
-    case WM_UNINITMENUPOPUP:
-    {
-        // Menu closed — re-sync instead of a raw HWND_TOP raise. syncCefWindowSize
-        // restores the popup to top normally, BUT its fullscreen guard keeps it
-        // hidden if a slideshow is up (e.g. Slide Show menu → Start Presentation,
-        // where the show window appears right after the menu closes).
-        if (pPanel)
-            pPanel->syncCefWindowSize();
-        return DefSubclassProc(hWnd, uMsg, wParam, lParam);
-    }
-
-    case WM_ENTERSIZEMOVE:
-    {
-        if (pPanel)
-            pPanel->m_bInSizeMove = true;
-        return DefSubclassProc(hWnd, uMsg, wParam, lParam);
-    }
-
-    case WM_EXITSIZEMOVE:
-    {
-        if (pPanel)
-        {
-            pPanel->m_bInSizeMove = false;
-            pPanel->syncCefWindowSize();
-        }
-        return DefSubclassProc(hWnd, uMsg, wParam, lParam);
-    }
-
-    case WM_NCDESTROY:
-    {
-        RemoveWindowSubclass(hWnd, FrameSubclassProc, uIdSubclass);
-        if (pPanel)
-        {
-            pPanel->m_bSubclassed = false;
-
-            // The LO frame HWND is being destroyed. Remove this frame's entry
-            // from the per-frame state map. The popup is an owned window of
-            // hWnd, so Windows destroys it automatically — we just need to
-            // clean up our map entry to avoid dangling references.
-            s_perFrameState.erase(hWnd);
-            SAL_INFO("officelabs.cef", "FrameSubclassProc WM_NCDESTROY: "
-                     "removed per-frame CEF state for frame " << hWnd);
-        }
-        return DefSubclassProc(hWnd, uMsg, wParam, lParam);
-    }
-
-    default:
-        return DefSubclassProc(hWnd, uMsg, wParam, lParam);
-    }
-}
 
 // ============================================================
 // CefClient implementation for this panel
@@ -370,7 +174,7 @@ public:
     // keys like F5 would otherwise be consumed by CEF as browser shortcuts
     // (F5 = page reload) instead of being dispatched to LibreOffice.
     // We intercept the specific hotkeys that have LO accelerator bindings and
-    // re-post them to the LO frame HWND so the LO accelerator table fires.
+    // ask the native host to re-dispatch them to the LO frame.
     bool OnPreKeyEvent(CefRefPtr<CefBrowser> /*browser*/,
                        const CefKeyEvent& event,
                        CefEventHandle /*os_event*/,
@@ -385,31 +189,14 @@ public:
         // F5  → .uno:Presentation (start slideshow from first slide)
         // F5+Shift → .uno:PresentationCurrentSlide (start from current slide)
         // Escape → stop running slideshow / close fullscreen presentation
-        if (vk != VK_F5 && vk != VK_ESCAPE)
+        if (vk != kVkF5 && vk != kVkEscape)
             return false;
 
         WebViewPanel* pPanel = m_pPanel.load(std::memory_order_acquire);
         if (!pPanel)
             return false;
 
-        HWND hFrame = pPanel->getFrameHwnd();
-        if (!hFrame || !IsWindow(hFrame))
-            return false;
-
-        // Build WPARAM/LPARAM for WM_KEYDOWN as Windows would.
-        // Bit 29 (context code) = 0 for WM_KEYDOWN.  Other extended-key and
-        // repeat fields are left at 0 — the accelerator dispatcher only looks
-        // at the VK code.
-        WPARAM wp = static_cast<WPARAM>(vk);
-        LPARAM lp = 0;
-        if (event.modifiers & EVENTFLAG_SHIFT_DOWN)
-            lp |= (MapVirtualKey(VK_SHIFT, MAPVK_VK_TO_VSC) << 16);
-
-        // Bring the LO frame to foreground so its message loop receives input,
-        // then post the key message.  PostMessage is non-blocking and safe to
-        // call from the CEF UI thread.
-        SetForegroundWindow(hFrame);
-        PostMessage(hFrame, WM_KEYDOWN, wp, lp);
+        pPanel->forwardKeyToFrame(vk, (event.modifiers & EVENTFLAG_SHIFT_DOWN) != 0);
         return true;  // prevent CEF from processing this key
     }
 
@@ -488,11 +275,22 @@ std::unique_ptr<PanelLayout> WebViewPanel::Create(
     return std::make_unique<WebViewPanel>(pParent, pBindings);
 }
 
+void WebViewPanel::broadcastSyncToAllPanels()
+{
+    for (auto* p : s_allPanels)
+        p->syncCefWindowSize();
+}
+
+void WebViewPanel::eraseFrameState(NativeWindowHandle hFrame)
+{
+    s_perFrameState.erase(hFrame);
+}
+
 void WebViewPanel::cleanupPersistentBrowser()
 {
     SAL_INFO("officelabs.cef", "cleanupPersistentBrowser: releasing all per-frame CEF state");
 
-    for (auto& [hwnd, state] : s_perFrameState)
+    for (auto& [handle, state] : s_perFrameState)
     {
         if (state.browser)
         {
@@ -503,10 +301,10 @@ void WebViewPanel::cleanupPersistentBrowser()
         state.messageRouter = nullptr;
         state.messageHandler.reset();
 
-        if (state.hCefParentWnd && IsWindow(state.hCefParentWnd))
+        if (state.host)
         {
-            DestroyWindow(state.hCefParentWnd);
-            state.hCefParentWnd = nullptr;
+            state.host->destroy();
+            state.host.reset();
         }
     }
 
@@ -527,7 +325,7 @@ WebViewPanel::WebViewPanel(weld::Widget* pParent, SfxBindings* pBindings)
     m_pDocController = std::make_unique<DocumentController>();
 
     // Initialize CEF if needed, then determine whether to init a new browser
-    // or reattach to an existing one for this frame. The frame HWND is not
+    // or reattach to an existing one for this frame. The frame handle is not
     // yet known here — initOrReattachCefBrowser() resolves it after layout.
     bool bCefOk = CefInit::instance().initialize();
     if (!bCefOk)
@@ -537,23 +335,16 @@ WebViewPanel::WebViewPanel(weld::Widget* pParent, SfxBindings* pBindings)
     }
 
     // Defer CEF browser creation to allow sidebar layout to complete.
-    // Then send a synthetic WM_SIZE to force the sidebar deck to re-layout
-    // with the correct dimensions.
+    // Then force the frame to re-layout so the sidebar deck picks up the
+    // correct dimensions.
     postToVclThread([this]() {
         initOrReattachCefBrowser();
 
-        // Option C: send synthetic WM_SIZE to frame to force sidebar re-layout
-        if (m_hFrameWnd)
-        {
-            RECT rc;
-            GetClientRect(m_hFrameWnd, &rc);
-            SendMessage(m_hFrameWnd, WM_SIZE, SIZE_RESTORED,
-                        MAKELPARAM(rc.right - rc.left, rc.bottom - rc.top));
-        }
+        // Option C: force the frame to re-layout once CEF has attached.
+        if (m_pNativeHost)
+            m_pNativeHost->forceFrameRelayout();
 
         // Force immediate size sync after re-layout
-        m_aLastSize = Size(0, 0);
-        m_aLastPos = Point(-1, -1);
         m_nReattachGraceTicks = 10;
         syncCefWindowSize();
     });
@@ -570,18 +361,10 @@ WebViewPanel::~WebViewPanel()
     if (it != s_allPanels.end())
         s_allPanels.erase(it);
 
-    // Remove frame subclass FIRST, before destroying any windows.
-    // This prevents the subclass proc from firing with a stale pointer.
-    if (m_bSubclassed && m_hFrameWnd && IsWindow(m_hFrameWnd))
-    {
-        RemoveWindowSubclass(m_hFrameWnd, FrameSubclassProc, CEFHOST_SUBCLASS_ID);
-        m_bSubclassed = false;
-    }
-
-    // DETACH: null out the panel pointer in the handler and client so
+    // DETACH: null out the panel pointer in the handler, client, and host so
     // they don't call back into a deleted panel. Do NOT close the browser
-    // or destroy the popup — they persist in per-frame state.
-    auto stateIt = s_perFrameState.find(m_hFrameWnd);
+    // or destroy the native host — they persist in per-frame state.
+    auto stateIt = s_perFrameState.find(m_hFrameHandle);
     if (stateIt != s_perFrameState.end())
     {
         auto& state = stateIt->second;
@@ -589,16 +372,18 @@ WebViewPanel::~WebViewPanel()
             state.messageHandler->setPanel(nullptr);
         if (state.client)
             static_cast<WebViewCefClient*>(state.client.get())->setPanel(nullptr);
+        if (state.host)
+            state.host->setPanel(nullptr);
     }
 
-    // Keep the popup WHERE IT IS during the destroy/recreate transition.
-    // DO NOT hide (SW_HIDE) or move off-screen — both cause the popup to
-    // not re-show because syncCefWindowSize() fights with the visibility
-    // state before the VCL parent is fully laid out.
+    // Keep the native host WHERE IT IS during the destroy/recreate transition.
+    // DO NOT hide it or move it off-screen — both cause it to not re-show
+    // because syncCefWindowSize() fights with the visibility state before
+    // the VCL parent is fully laid out.
 
     // Clear instance copies (per-frame state keeps the real references alive)
     m_browser = nullptr;
-    m_hCefParentWnd = nullptr;
+    m_pNativeHost = nullptr;
 
     m_pBinWindow.disposeAndClear();
 }
@@ -625,17 +410,17 @@ void WebViewPanel::initOrReattachCefBrowser()
     }
 
     const SystemEnvData* pFrameData = pSizedParent->GetSystemData();
-    HWND hFrameWnd = pFrameData ? static_cast<HWND>(pFrameData->hWnd) : nullptr;
-    if (!hFrameWnd)
+    NativeWindowHandle hFrameHandle = nativeHandleFromSystemEnvData(pFrameData);
+    if (!hFrameHandle)
     {
-        SAL_WARN("officelabs.cef", "initOrReattach: could not get frame HWND");
+        SAL_WARN("officelabs.cef", "initOrReattach: could not get frame native handle");
         return;
     }
 
-    m_hFrameWnd = hFrameWnd;
+    m_hFrameHandle = hFrameHandle;
 
     // Check if this frame already has an active browser
-    auto it = s_perFrameState.find(m_hFrameWnd);
+    auto it = s_perFrameState.find(m_hFrameHandle);
     if (it != s_perFrameState.end() && it->second.browserCreated)
     {
         SAL_INFO("officelabs.cef", "initOrReattach: frame already has browser — reattaching");
@@ -650,12 +435,12 @@ void WebViewPanel::initOrReattachCefBrowser()
 
 void WebViewPanel::initCefBrowser()
 {
-    // m_hFrameWnd and m_pBinWindow are set by initOrReattachCefBrowser()
-    if (!m_hFrameWnd || !m_pBinWindow)
+    // m_hFrameHandle and m_pBinWindow are set by initOrReattachCefBrowser()
+    if (!m_hFrameHandle || !m_pBinWindow)
         return;
 
     // Create per-frame state entry
-    auto& state = s_perFrameState[m_hFrameWnd];
+    auto& state = s_perFrameState[m_hFrameHandle];
 
     // --- Set up CefMessageRouter for JS <-> C++ IPC ---
     CefMessageRouterConfig config;
@@ -679,44 +464,19 @@ void WebViewPanel::initCefBrowser()
     int scrX = static_cast<int>(aScrPos.X());
     int scrY = static_cast<int>(aScrPos.Y());
 
-    // Register custom window class (once) — no background brush = no flash.
-    registerCefHostClass();
-
-    // Create an OWNED popup window at the sidebar's screen position.
-    // Owner = m_hFrameWnd: popup is bound to this specific document frame.
-    // When m_hFrameWnd is destroyed, Windows auto-destroys this popup.
-    HWND hCefParent = CreateWindowExW(
-        WS_EX_TOOLWINDOW,
-        L"OfficeLabsCefHost", L"",
-        WS_POPUP | WS_CLIPCHILDREN,
-        scrX, scrY, w, h,
-        m_hFrameWnd, nullptr, GetModuleHandle(nullptr), nullptr);
+    // Create the native host (owned popup on Windows, child NSView on mac)
+    // anchored to this frame.
+    state.host = createNativeCefHost(this);
+    NativeWindowHandle hCefParent = state.host->create(NativeParent{ m_hFrameHandle });
 
     if (hCefParent)
     {
-        SetWindowPos(hCefParent, HWND_TOP,
-                     0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        state.host->setBounds(scrX, scrY, w, h);
+        state.host->show();
+        state.host->raiseAbove();
     }
 
-    state.hCefParentWnd = hCefParent;
-    m_hCefParentWnd = hCefParent;
-    m_aLastSize = Size(w, h);
-    m_aLastPos = Point(scrX, scrY);
-
-    // Subclass the frame HWND for instant move/resize/activate notifications.
-    if (SetWindowSubclass(m_hFrameWnd, FrameSubclassProc,
-                          CEFHOST_SUBCLASS_ID,
-                          reinterpret_cast<DWORD_PTR>(this)))
-    {
-        m_bSubclassed = true;
-        SAL_INFO("officelabs.cef", "Frame HWND subclassed for instant tracking");
-    }
-    else
-    {
-        SAL_WARN("officelabs.cef",
-                 "SetWindowSubclass failed, falling back to timer-only tracking");
-    }
+    m_pNativeHost = state.host.get();
 
     if (!hCefParent)
         return;
@@ -724,12 +484,12 @@ void WebViewPanel::initCefBrowser()
     // --- Create CEF browser ---
     CefWindowInfo windowInfo;
     CefBrowserSettings browserSettings;
-    windowInfo.SetAsChild(hCefParent, CefRect(0, 0, w, h));
+    windowInfo.SetAsChild(static_cast<CefWindowHandle>(hCefParent), CefRect(0, 0, w, h));
 
     OUString url = getUIUrl();
     OString utf8Url = OUStringToOString(url, RTL_TEXTENCODING_UTF8);
     SAL_INFO("officelabs.cef", "Creating CEF browser for frame "
-             << reinterpret_cast<sal_uIntPtr>(m_hFrameWnd)
+             << reinterpret_cast<sal_uIntPtr>(m_hFrameHandle)
              << " URL: " << utf8Url);
 
     CefBrowserHost::CreateBrowser(
@@ -743,11 +503,6 @@ void WebViewPanel::initCefBrowser()
 
     state.browserCreated = true;
 
-    // Reset cached size to force syncCefWindowSize() to recalculate
-    // on the first timer tick (avoids stale initial dimensions)
-    m_aLastSize = Size(0, 0);
-    m_aLastPos = Point(-1, -1);
-
     // Start resize tracking timer
     m_aResizeTimer.SetInvokeHandler(LINK(this, WebViewPanel, ResizeTimerHdl));
     m_aResizeTimer.SetTimeout(500);
@@ -756,14 +511,14 @@ void WebViewPanel::initCefBrowser()
 
 void WebViewPanel::reattachCefBrowser()
 {
-    // m_hFrameWnd and m_pBinWindow are set by initOrReattachCefBrowser()
-    if (!m_hFrameWnd || !m_pBinWindow)
+    // m_hFrameHandle and m_pBinWindow are set by initOrReattachCefBrowser()
+    if (!m_hFrameHandle || !m_pBinWindow)
         return;
 
-    auto it = s_perFrameState.find(m_hFrameWnd);
+    auto it = s_perFrameState.find(m_hFrameHandle);
     if (it == s_perFrameState.end())
     {
-        SAL_WARN("officelabs.cef", "reattach: no per-frame state for this HWND — init instead");
+        SAL_WARN("officelabs.cef", "reattach: no per-frame state for this handle — init instead");
         initCefBrowser();
         return;
     }
@@ -773,31 +528,21 @@ void WebViewPanel::reattachCefBrowser()
 
     // Copy per-frame refs into instance members
     m_browser = state.browser;
-    m_hCefParentWnd = state.hCefParentWnd;
+    m_pNativeHost = state.host.get();
 
-    // Re-wire handler and client to point to this (new) panel
+    // Re-wire handler, client, and host to point to this (new) panel
     if (state.messageHandler)
         state.messageHandler->setPanel(this);
     if (state.client)
         static_cast<WebViewCefClient*>(state.client.get())->setPanel(this);
+    if (state.host)
+        state.host->setPanel(this);
 
-    // Install frame subclass on the (possibly new) frame HWND
-    if (!m_bSubclassed)
+    // Show the host and bring it to the top of Z-order.
+    if (m_pNativeHost)
     {
-        if (SetWindowSubclass(m_hFrameWnd, FrameSubclassProc,
-                              CEFHOST_SUBCLASS_ID,
-                              reinterpret_cast<DWORD_PTR>(this)))
-        {
-            m_bSubclassed = true;
-        }
-    }
-
-    // Show the popup and bring it to the top of Z-order.
-    if (state.hCefParentWnd)
-    {
-        SetWindowPos(state.hCefParentWnd, HWND_TOP,
-                     0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        m_pNativeHost->show();
+        m_pNativeHost->raiseAbove();
 
         if (m_browser)
         {
@@ -806,7 +551,7 @@ void WebViewPanel::reattachCefBrowser()
         }
     }
 
-    // GRACE PERIOD: prevent syncCefWindowSize() from hiding the popup
+    // GRACE PERIOD: prevent syncCefWindowSize() from hiding the host
     // during the first few seconds while VCL lays out the sidebar.
     // 10 ticks × 500ms timer = 5 seconds max.
     m_nReattachGraceTicks = 10;
@@ -833,7 +578,7 @@ void WebViewPanel::reattachCefBrowser()
 
 void WebViewPanel::syncCefWindowSize()
 {
-    if (!m_hCefParentWnd || !m_pBinWindow)
+    if (!m_pNativeHost || !m_pBinWindow)
         return;
 
     // Walk up the VCL hierarchy to find the largest enclosing sidebar panel.
@@ -849,59 +594,13 @@ void WebViewPanel::syncCefWindowSize()
     if (pGrandParent && pGrandParent->GetSizePixel().Height() > pParent->GetSizePixel().Height())
         pParent = pGrandParent;
 
-    // --- Visibility management ---
-    // Show this panel's popup whenever its sidebar is visible and its frame
-    // is not minimized. Each frame owns its own popup window (positioned at
-    // its own sidebar), so multiple panels can be visible simultaneously
-    // across different document windows without overlapping each other.
-    HWND hFg = GetForegroundWindow();
-    // Check if frame is active: direct match OR foreground is a descendant
-    // of our frame (handles OLE in-place activation windows like charts).
-    bool bFrameActive = (hFg == m_hFrameWnd || hFg == m_hCefParentWnd
-                         || (m_hFrameWnd && IsChild(m_hFrameWnd, hFg)));
-
     bool bSidebarVisible = pParent->IsReallyVisible();
-    bool bFrameMinimized = m_hFrameWnd && IsIconic(m_hFrameWnd);
-    bool bShouldShow = bSidebarVisible && !bFrameMinimized;
 
-    bool bIsShown = IsWindowVisible(m_hCefParentWnd);
-
-    // --- Fullscreen-window guard (e.g. Impress slideshow) ---
-    // The CEF sidebar popup is a separate top-level window. The z-order logic
-    // below keeps it on top of our frame, which would also place it OVER a
-    // fullscreen presentation (started via F5 / Slide Show), hiding the show.
-    // If a fullscreen window other than ours holds the foreground, hide the
-    // popup. It is restored when the frame regains foreground (Esc / show end),
-    // which re-runs this sync via WM_ACTIVATE.
-    if (hFg && hFg != m_hCefParentWnd && hFg != m_hFrameWnd)
-    {
-        RECT rcFg{};
-        HMONITOR hMon = MonitorFromWindow(hFg, MONITOR_DEFAULTTONEAREST);
-        MONITORINFO mi{};
-        mi.cbSize = sizeof(MONITORINFO);
-        // A fullscreen slideshow is a BORDERLESS (no WS_CAPTION) top-level
-        // window covering the whole monitor. Requiring "no caption" excludes
-        // ordinary MAXIMIZED windows (which keep their caption and cover only
-        // the work area), so we don't hide the popup for those. A small edge
-        // tolerance absorbs DPI/rounding insets.
-        constexpr LONG kEdge = 2;
-        if (GetWindowRect(hFg, &rcFg) && GetMonitorInfo(hMon, &mi)
-            && !(GetWindowLong(hFg, GWL_STYLE) & WS_CAPTION)
-            && rcFg.left   <= mi.rcMonitor.left   + kEdge
-            && rcFg.top    <= mi.rcMonitor.top    + kEdge
-            && rcFg.right  >= mi.rcMonitor.right  - kEdge
-            && rcFg.bottom >= mi.rcMonitor.bottom - kEdge)
-        {
-            if (bIsShown)
-                ShowWindow(m_hCefParentWnd, SW_HIDE);
-            return;
-        }
-    }
-
-    // GRACE PERIOD after reattach (same as before — handles OLE activation).
+    // GRACE PERIOD after reattach (handles OLE activation): don't hide just
+    // because VCL hasn't finished laying out the reattached sidebar yet.
     if (m_nReattachGraceTicks > 0)
     {
-        if (bShouldShow)
+        if (bSidebarVisible)
         {
             m_nReattachGraceTicks = 0;
             SAL_INFO("officelabs.cef", "syncCef: grace period ended (VCL ready)");
@@ -915,87 +614,24 @@ void WebViewPanel::syncCefWindowSize()
         }
     }
 
-    if (bShouldShow && !bIsShown)
-        ShowWindow(m_hCefParentWnd, SW_SHOWNA);
-    else if (!bShouldShow && bIsShown)
-        ShowWindow(m_hCefParentWnd, SW_HIDE);
-
-    if (!bShouldShow)
-        return;
-
-    // --- Z-order ---
-    // Detect popup/floating windows by scanning Z-order above us.
-    // If a visible WS_POPUP window exists between our frame and the top
-    // of Z-order (that isn't our CEF window), a dropdown is open —
-    // don't boost to HWND_TOP so the dropdown stays above us.
+    if (!bSidebarVisible)
     {
-        bool bPopupAbove = false;
-        if (bFrameActive)
-        {
-            HWND hAbove = GetWindow(m_hCefParentWnd, GW_HWNDPREV);
-            for (int i = 0; hAbove && i < 20; ++i, hAbove = GetWindow(hAbove, GW_HWNDPREV))
-            {
-                if (hAbove == m_hFrameWnd)
-                    break;
-                if (!IsWindowVisible(hAbove))
-                    continue;
-                LONG style = GetWindowLong(hAbove, GWL_STYLE);
-                if (style & WS_POPUP)
-                {
-                    bPopupAbove = true;
-                    break;
-                }
-            }
-        }
-
-        if (!bPopupAbove && bFrameActive)
-        {
-            SetWindowPos(m_hCefParentWnd, HWND_TOP,
-                         0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
+        m_pNativeHost->hide();
+        return;
     }
 
-    // --- Position and size tracking ---
+    // --- Position and size ---
     Size aSize = pParent->GetSizePixel();
     auto aScrPos = pParent->OutputToAbsoluteScreenPixel(Point(0, 0));
-    Point aPos(static_cast<int>(aScrPos.X()), static_cast<int>(aScrPos.Y()));
 
-    // Skip cache check during grace period — sidebar may still be resizing
-    if (m_nReattachGraceTicks <= 0 && aSize == m_aLastSize && aPos == m_aLastPos)
-        return;
+    // setBounds() performs the full native sync (fullscreen guard, minimized
+    // check, z-order, actual apply) — see the platform host implementations.
+    // Always called; a native no-op when nothing actually changed.
+    m_pNativeHost->setBounds(static_cast<int>(aScrPos.X()), static_cast<int>(aScrPos.Y()),
+                             aSize.Width(), aSize.Height());
 
-    m_aLastSize = aSize;
-    m_aLastPos = aPos;
-
-    SetWindowPos(m_hCefParentWnd, nullptr,
-                 aPos.X(), aPos.Y(),
-                 aSize.Width(), aSize.Height(),
-                 SWP_NOZORDER | SWP_NOACTIVATE);
-
-    // Resize ALL CEF child windows to match the parent.
-    // CEF creates nested HWNDs: Chrome_WidgetWin_1 → Chrome_RenderWidgetHostHWND
-    // Both must be resized or the viewport stays at the initial (wrong) size.
     // NOTE: m_browser may be null during first few seconds (async creation),
-    // so we resize children by HWND enumeration regardless of m_browser state.
-    HWND hChild = GetWindow(m_hCefParentWnd, GW_CHILD);
-    while (hChild)
-    {
-        HWND hNext = GetWindow(hChild, GW_HWNDNEXT);
-        if (IsWindow(hChild))
-        {
-            MoveWindow(hChild, 0, 0, aSize.Width(), aSize.Height(), FALSE);
-            HWND hGrandChild = GetWindow(hChild, GW_CHILD);
-            while (hGrandChild)
-            {
-                HWND hGrandNext = GetWindow(hGrandChild, GW_HWNDNEXT);
-                if (IsWindow(hGrandChild))
-                    MoveWindow(hGrandChild, 0, 0, aSize.Width(), aSize.Height(), FALSE);
-                hGrandChild = hGrandNext;
-            }
-        }
-        hChild = hNext;
-    }
+    // so this is a best-effort notification, matching the pre-refactor code.
     if (m_browser)
     {
         m_browser->GetHost()->NotifyMoveOrResizeStarted();
@@ -1007,6 +643,12 @@ IMPL_LINK_NOARG(WebViewPanel, ResizeTimerHdl, Timer*, void)
 {
     syncCefWindowSize();
     m_aResizeTimer.Start();  // Restart for next check
+}
+
+void WebViewPanel::forwardKeyToFrame(int vkCode, bool bShift)
+{
+    if (m_pNativeHost)
+        m_pNativeHost->forwardKeyEvent(vkCode, bShift);
 }
 
 OUString WebViewPanel::getUIUrl() const
@@ -1088,7 +730,7 @@ void WebViewPanel::detectDocument()
     m_pDocController->setAppType(sAppType);
 
     // Update per-frame lastDocShell
-    auto stateIt = s_perFrameState.find(m_hFrameWnd);
+    auto stateIt = s_perFrameState.find(m_hFrameHandle);
     if (stateIt != s_perFrameState.end())
         stateIt->second.lastDocShell = pShell;
 
@@ -1124,7 +766,7 @@ void WebViewPanel::onBrowserCreated(CefRefPtr<CefBrowser> browser)
     m_browser = browser;
 
     // Store in per-frame state
-    auto stateIt = s_perFrameState.find(m_hFrameWnd);
+    auto stateIt = s_perFrameState.find(m_hFrameHandle);
     if (stateIt != s_perFrameState.end())
     {
         stateIt->second.browser = browser;
@@ -1134,16 +776,11 @@ void WebViewPanel::onBrowserCreated(CefRefPtr<CefBrowser> browser)
     }
 
     SAL_INFO("officelabs.cef", "CEF browser created for frame "
-             << reinterpret_cast<sal_uIntPtr>(m_hFrameWnd));
+             << reinterpret_cast<sal_uIntPtr>(m_hFrameHandle));
 
-    // Browser is ready — force immediate resize of all CEF child HWNDs
-    // to match the parent. Without this, the viewport stays at the initial
-    // (too-large) CefRect from CreateBrowser and the bottom is clipped.
+    // Browser is ready — force immediate resize sync now that m_browser is set.
     postToVclThread([this]() {
-        m_aLastSize = Size(0, 0);
-        m_aLastPos = Point(-1, -1);
         syncCefWindowSize();
-
         detectDocument();
     });
 }

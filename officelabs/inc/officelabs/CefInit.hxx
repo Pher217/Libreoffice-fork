@@ -6,9 +6,11 @@
  * shut down cleanly when LibreOffice exits.
  *
  * Key settings:
- *   multi_threaded_message_loop = true  (CEF runs its own thread)
  *   no_sandbox = true
  *   remote_debugging_port = 9222
+ *   Message loop: Windows uses multi_threaded_message_loop (CEF owns its own
+ *     thread); macOS uses external_message_pump instead (does not exist on
+ *     mac) and pumps CefDoMessageLoopWork() from OfficelabsBrowserApp.
  */
 
 #ifndef INCLUDED_OFFICELABS_CEFINIT_HXX
@@ -35,7 +37,8 @@ public:
     // Called at LibreOffice shutdown
     void shutdown();
 
-    // Path to officelabs_cef_subprocess.exe
+    // Path to the CEF subprocess: officelabs_cef_subprocess(.exe) on
+    // Windows/Linux, the "OfficeLabs Helper" .app bundle executable on macOS.
     OUString getSubprocessPath() const;
 
     int getRemoteDebuggingPort() const { return 9222; }

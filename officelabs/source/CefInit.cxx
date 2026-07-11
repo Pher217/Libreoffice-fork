@@ -2,9 +2,13 @@
 /*
  * OfficeLabs CEF Initialization
  *
- * CRITICAL: multi_threaded_message_loop = true
- *           external_message_pump = false
- * This avoids conflicts with LibreOffice's VCL event loop.
+ * Message-loop mode is platform-dependent so CEF never conflicts with
+ * LibreOffice's VCL event loop:
+ *   Windows: multi_threaded_message_loop = true, external_message_pump = false
+ *            (CEF owns its own UI thread; not available on macOS).
+ *   macOS:   multi_threaded_message_loop = false, external_message_pump = true
+ *            (LO owns the AppKit run loop; CefDoMessageLoopWork() is pumped by
+ *            OfficelabsBrowserApp::OnScheduleMessagePumpWork()).
  */
 
 #ifdef HAVE_FEATURE_CEF
@@ -38,7 +42,26 @@
 #include <cstdlib>
 #include <string>
 
+#include <officelabs/OfficelabsBrowserApp.hxx>
+
+#ifdef MACOSX
+#include <include/wrapper/cef_library_loader.h>
+#include <optional>
+#include <sys/stat.h>
+#include <pthread.h>
+#include <dlfcn.h>
+#include <cstdio>
+#endif
+
+
 namespace {
+
+#ifdef MACOSX
+// Process-lifetime CEF framework loader. On macOS the framework is dlopen'd at
+// runtime (a sandbox requirement) and the loader must outlive every CEF call,
+// so it is held in this file-static optional and never reset once loaded.
+std::optional<CefScopedLibraryLoader> g_oLibraryLoader;
+#endif
 
 // Drives CefShutdown() on the main thread during normal LibreOffice
 // termination. CEF is initialized with multi_threaded_message_loop = true,
@@ -91,6 +114,23 @@ bool CefInit::initialize()
     if (m_bInitialized)
         return true;
 
+#ifdef MACOSX
+    // Load the CEF framework at runtime before any other CEF call. The loader
+    // has process lifetime (see g_oLibraryLoader).
+    if (!g_oLibraryLoader)
+    {
+        g_oLibraryLoader.emplace();
+        if (!g_oLibraryLoader->LoadInMain())
+        {
+            SAL_WARN("officelabs.cef",
+                     "CefScopedLibraryLoader::LoadInMain() FAILED");
+            g_oLibraryLoader.reset();
+            return false;
+        }
+        SAL_INFO("officelabs.cef", "CEF framework loaded (LoadInMain)");
+    }
+#endif
+
 #ifdef _WIN32
     CefMainArgs main_args(GetModuleHandle(nullptr));
 #else
@@ -99,9 +139,18 @@ bool CefInit::initialize()
 
     CefSettings settings;
 
-    // CRITICAL: Use multi-threaded message loop so CEF doesn't block VCL
+    // Message-loop mode is platform-dependent (see file header).
+#ifdef MACOSX
+    // macOS has no multi_threaded_message_loop. LibreOffice owns the AppKit
+    // run loop, so use external_message_pump and drive CefDoMessageLoopWork()
+    // from OfficelabsBrowserApp::OnScheduleMessagePumpWork().
+    settings.multi_threaded_message_loop = false;
+    settings.external_message_pump = true;
+#else
+    // Windows: CEF owns its own UI thread so it doesn't block VCL.
     settings.multi_threaded_message_loop = true;
     settings.external_message_pump = false;
+#endif
 
     // No sandbox - LibreOffice doesn't support CEF's sandbox model
     settings.no_sandbox = true;
@@ -116,6 +165,13 @@ bool CefInit::initialize()
     OUString subprocessPath = getSubprocessPath();
     OString utf8Path = OUStringToOString(subprocessPath, RTL_TEXTENCODING_UTF8);
     CefString(&settings.browser_subprocess_path).FromASCII(utf8Path.getStr());
+
+#ifdef MACOSX
+    {
+        struct stat sSubprocessStat;
+        bool bSubprocessExists = (::stat(utf8Path.getStr(), &sSubprocessStat) == 0);
+    }
+#endif
 
     // Persistent cache — enables localStorage across CEF browser restarts.
     // Without this, CEF runs in "incognito mode" and localStorage is lost
@@ -132,15 +188,60 @@ bool CefInit::initialize()
             SAL_INFO("officelabs.cef", "CEF cache: " << rootCache);
         }
     }
+#elif defined(MACOSX)
+    {
+        // macOS stores per-user app data under
+        // ~/Library/Application Support/OfficeLabs/ (Apple convention, NOT the
+        // app bundle's own Contents/). CEF will not create missing parent
+        // directories, and a missing cache_path forces incognito mode and loses
+        // localStorage on the first run, so create the dirs up front.
+        const char* home = std::getenv("HOME");
+        if (home)
+        {
+            std::string rootCache =
+                std::string(home) + "/Library/Application Support/OfficeLabs/cef_data";
+            std::string profileCache = rootCache + "/Default";
+
+            auto mkdirp = [](const std::string& path) {
+                std::size_t pos = 0;
+                while ((pos = path.find('/', pos + 1)) != std::string::npos)
+                    ::mkdir(path.substr(0, pos).c_str(), 0700);
+                ::mkdir(path.c_str(), 0700); // final component (EEXIST is fine)
+            };
+            mkdirp(rootCache);
+            mkdirp(profileCache);
+
+            CefString(&settings.root_cache_path).FromASCII(rootCache.c_str());
+            CefString(&settings.cache_path).FromASCII(profileCache.c_str());
+            SAL_INFO("officelabs.cef", "CEF cache: " << rootCache);
+        }
+        else
+        {
+            SAL_WARN("officelabs.cef", "HOME not set - CEF cache left at default");
+        }
+    }
 #endif
 
     // Log settings
-    settings.log_severity = LOGSEVERITY_INFO;
-    CefString(&settings.log_file).FromASCII("officelabs_cef.log");
+    // officelabs.cef Phase-1 instrumentation: the previous relative path
+    // was silently unwritable (GUI app bundles run with cwd "/"), so
+    // Chromium's own init log - the best explainer of init failures - was
+    // never produced. Use an absolute path and verbose severity instead.
+    settings.log_severity = LOGSEVERITY_VERBOSE;
+    CefString(&settings.log_file).FromASCII("/tmp/officelabs_cef_debug.log");
 
     SAL_INFO("officelabs.cef", "Initializing CEF with subprocess: " << utf8Path);
 
-    if (!CefInitialize(main_args, settings, nullptr, nullptr))
+    // Browser-process app. On macOS this provides the external message-pump
+    // integration (OnScheduleMessagePumpWork). On Windows CEF runs its own UI
+    // thread, so no browser app is needed and the pointer stays null.
+    CefRefPtr<CefApp> browserApp;
+#ifdef MACOSX
+    browserApp = new OfficelabsBrowserApp();
+#endif
+
+    bool bCefInitOk = CefInitialize(main_args, settings, browserApp, nullptr);
+    if (!bCefInitOk)
     {
         SAL_WARN("officelabs.cef", "CefInitialize() FAILED");
         return false;
@@ -148,6 +249,13 @@ bool CefInit::initialize()
 
     m_bInitialized = true;
     SAL_INFO("officelabs.cef", "CEF initialized successfully (debug port 9222)");
+
+#ifdef MACOSX
+    // Drive CEF with a 30Hz heartbeat. The pure on-demand external pump
+    // (OnScheduleMessagePumpWork) proved unreliable under VCL's nested run
+    // loop; see OfficelabsBrowserApp.cxx / MessagePumpMac.mm.
+    StartCefPumpHeartbeat();
+#endif
 
     // Register a terminate listener so CefShutdown() runs on the main thread
     // during normal LO termination, before static destructors (see comment on
@@ -189,6 +297,11 @@ void CefInit::shutdown()
     // is still alive, otherwise their destructors touch freed CEF state.
     WebViewPanel::cleanupPersistentBrowser();
 
+#ifdef MACOSX
+    // Stop the heartbeat BEFORE CefShutdown so no CefDoMessageLoopWork can
+    // fire against a torn-down CEF.
+    StopCefPumpHeartbeat();
+#endif
     CefShutdown();
     m_bInitialized = false;
     SAL_INFO("officelabs.cef", "CEF shutdown complete");
@@ -209,6 +322,16 @@ OUString CefInit::getSubprocessPath() const
 
 #ifdef _WIN32
     return sSystemPath + "\\program\\officelabs_cef_subprocess.exe";
+#elif defined(MACOSX)
+    // On macOS CEF launches a separate Helper .app bundle, not a bare
+    // executable. sSystemPath resolves to "<App>.app/Contents" (BRAND_BASE_DIR
+    // is .../Contents and BRAND_SHARE_SUBDIR is Resources, so
+    // "$BRAND_BASE_DIR/$BRAND_SHARE_SUBDIR/.." == .../Contents). CEF derives the
+    // (GPU)/(Renderer)/(Plugin)/(Alerts) sibling bundles from this main-helper
+    // path by suffix. This name MUST match the bundle produced by
+    // CustomTarget_cef_mac_bundle.mk (see officelabs/mac/helper-plists).
+    return sSystemPath
+         + "/Frameworks/OfficeLabs Helper.app/Contents/MacOS/OfficeLabs Helper";
 #else
     return sSystemPath + "/program/officelabs_cef_subprocess";
 #endif

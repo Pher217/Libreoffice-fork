@@ -6,9 +6,17 @@
 
 ifeq ($(ENABLE_CEF),TRUE)
 
-# CEF Release DLLs -> instdir/program/
+# The 'cef' package is registered unconditionally in Repository.mk when
+# ENABLE_CEF is set, so it must be DEFINED on every platform (an undefined but
+# registered package that a module reads errors with "No target registered").
+# On Windows it copies the loose CEF runtime DLLs next to soffice.exe. On macOS
+# there are no loose runtime binaries -- the framework and the five Helper .app
+# bundles are assembled and installed by CustomTarget_cef_mac_bundle -- so the
+# package is defined empty (valid: FILES defaults to empty).
 $(eval $(call gb_Package_Package,cef,$(CEF_DIR)/Release))
 
+ifeq ($(OS),WNT)
+# CEF Release DLLs -> instdir/program/
 $(eval $(call gb_Package_add_files,cef,$(LIBO_BIN_FOLDER),\
     libcef.dll \
     chrome_elf.dll \
@@ -19,6 +27,7 @@ $(eval $(call gb_Package_add_files,cef,$(LIBO_BIN_FOLDER),\
     vulkan-1.dll \
     v8_context_snapshot.bin \
 ))
+endif
 
 endif
 

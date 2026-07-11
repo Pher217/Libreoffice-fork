@@ -15,6 +15,10 @@
 #include <include/cef_app.h>
 #include <include/wrapper/cef_message_router.h>
 
+#ifdef MACOSX
+#include <include/wrapper/cef_library_loader.h>
+#endif
+
 // Renderer-side CefApp: sets up the message router in the render process
 // so that window.cefQuery / window.cefQueryCancel are available in JS.
 class OfficelabsRendererApp : public CefApp,
@@ -81,6 +85,16 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/,
 
 int main(int argc, char* argv[])
 {
+#ifdef MACOSX
+    // On macOS the CEF framework is dlopen'd at runtime (a sandbox
+    // requirement), so every helper process must load it before any other CEF
+    // call. Mirrors tests/cefsimple/process_helper_mac.cc. No sandbox context
+    // is needed because OfficeLabs runs CEF with no_sandbox = true.
+    CefScopedLibraryLoader library_loader;
+    if (!library_loader.LoadInHelper())
+        return 1;
+#endif
+
     CefMainArgs main_args(argc, argv);
     CefRefPtr<OfficelabsRendererApp> app(new OfficelabsRendererApp);
     return CefExecuteProcess(main_args, app, nullptr);

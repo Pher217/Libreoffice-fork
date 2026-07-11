@@ -10,12 +10,20 @@
  *   JS -> C++: window.cefQuery() routed to WebViewMessageHandler
  *
  * BROWSER PERSISTENCE:
- *   The CEF browser and its popup HWND live in static storage and survive
+ *   The CEF browser and its native host window/view live in static storage
+ *   (PerFrameCefState, keyed by the LO frame's native handle) and survive
  *   panel destruction/recreation.  This prevents the sidebar from losing
  *   state when OLE in-place activation (charts, equations) temporarily
  *   changes the frame context.
- *   On panel destroy: popup is hidden, handler panel-pointer is nulled.
- *   On panel create:  popup is shown/repositioned, handler is re-wired.
+ *   On panel destroy: host is hidden/detached, handler panel-pointer is nulled.
+ *   On panel create:  host is shown/repositioned, handler is re-wired.
+ *
+ * PLATFORM ISOLATION (mac port, Decision 5):
+ *   All native window operations (Win32 on Windows, Cocoa on macOS) are
+ *   isolated behind INativeCefHost (see officelabs/INativeCefHost.hxx).
+ *   This file and WebViewPanel.cxx are platform-neutral; the Windows impl
+ *   lives in WebViewPanelHostWin.cxx, the macOS impl in
+ *   WebViewPanelHostMac.mm.
  */
 
 #ifndef INCLUDED_OFFICELABS_WEBVIEWPANEL_HXX
@@ -32,6 +40,7 @@
 #endif
 
 #include <officelabs/officelabsdllapi.h>
+#include <officelabs/INativeCefHost.hxx>
 #include <sfx2/sidebar/PanelLayout.hxx>
 #include <vcl/syschild.hxx>
 #include <vcl/sysdata.hxx>
@@ -60,6 +69,18 @@ public:
     /// Release static CEF resources before CefShutdown(). Called by CefInit.
     static void cleanupPersistentBrowser();
 
+    /// Broadcast syncCefWindowSize() to every currently alive panel. Called
+    /// by a native host when its frame is activated, so every sidebar's
+    /// host window/view re-evaluates show/hide instantly instead of waiting
+    /// for its own timer tick (mirrors the pre-refactor WM_ACTIVATE
+    /// broadcast in FrameSubclassProc).
+    static void broadcastSyncToAllPanels();
+
+    /// Remove the per-frame CEF state entry for a destroyed native frame.
+    /// Called by a native host when it observes the owning LO frame being
+    /// torn down (Windows: WM_NCDESTROY on the subclassed frame HWND).
+    static void eraseFrameState(NativeWindowHandle hFrame);
+
     WebViewPanel(weld::Widget* pParent, SfxBindings* pBindings);
     virtual ~WebViewPanel() override;
 
@@ -68,9 +89,6 @@ public:
 
     // Access the browser (for message handler)
     CefRefPtr<CefBrowser> getBrowser() const { return m_browser; }
-
-    // Access the LO frame HWND (for keyboard handler key forwarding)
-    HWND getFrameHwnd() const { return m_hFrameWnd; }
 
     // Called by CefLifeSpanHandler when browser is created
     void onBrowserCreated(CefRefPtr<CefBrowser> browser);
@@ -84,20 +102,22 @@ public:
     // Access document controller (for message handler)
     DocumentController* getDocController() const { return m_pDocController.get(); }
 
+    // Recompute this panel's host geometry/visibility from the current VCL
+    // layout and hand off to the native host. Public because the native
+    // host's frame-tracking hook calls back into it (see
+    // INativeCefHost::onFrameMoved()/onFrameResized()).
+    void syncCefWindowSize();
+
+    // Forward an intercepted CEF key event (F5 / Esc slideshow hotkeys) to
+    // the native host so it can re-dispatch to the LO frame's accelerator
+    // table. Called by WebViewCefClient::OnPreKeyEvent.
+    void forwardKeyToFrame(int vkCode, bool bShift);
+
 private:
     void initOrReattachCefBrowser();
     void initCefBrowser();
     void reattachCefBrowser();
     OUString getUIUrl() const;
-    void syncCefWindowSize();
-
-    // One-time registration of the "OfficeLabsCefHost" window class
-    static bool registerCefHostClass();
-
-    // Subclass proc installed on m_hFrameWnd for instant position tracking
-    static LRESULT CALLBACK FrameSubclassProc(
-        HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
-        UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 
     DECL_LINK(ResizeTimerHdl, Timer*, void);
 
@@ -106,37 +126,36 @@ private:
     // VclBin created via CreateChildFrame() inside the weld container
     VclPtr<vcl::Window> m_pBinWindow;
 
-    // Instance copies of persistent static state (for convenience)
-    HWND m_hCefParentWnd = nullptr;
+    // Non-owning: points into s_perFrameState[m_hFrameHandle].host, which
+    // owns the actual native CEF host window/view and survives panel
+    // destroy/recreate (OLE in-place activation). Null until
+    // initOrReattachCefBrowser() resolves the frame.
+    INativeCefHost* m_pNativeHost = nullptr;
+
     CefRefPtr<CefBrowser> m_browser;
 
-    // Per-instance frame tracking
-    HWND m_hFrameWnd = nullptr;
+    // Opaque native handle for the owning LO document frame: HWND on
+    // Windows, NSView* on macOS. Used only as the per-frame-state map key
+    // and to hand to INativeCefHost::create() -- never dereferenced here.
+    NativeWindowHandle m_hFrameHandle = nullptr;
 
-    // Resize tracking: timer polls for container size changes (fallback)
+    // Resize tracking: timer polls for container size changes (fallback
+    // when the native frame-tracking hook doesn't fire, e.g. mac for now).
     Timer m_aResizeTimer{ "officelabs::WebViewPanel resize" };
-    Size m_aLastSize;
-    Point m_aLastPos;
-
-    // Subclass tracking
-    bool m_bInSizeMove = false;
-    bool m_bSubclassed = false;
 
     // Grace period after reattach: number of timer ticks during which
-    // syncCefWindowSize() will NOT hide the popup.  This prevents the
+    // syncCefWindowSize() will NOT hide the host.  This prevents the
     // "black sidebar" after OLE in-place activation (chart insert etc.)
     // where the VCL parent isn't laid out yet and IsReallyVisible()
-    // returns false, causing an immediate SW_HIDE.
+    // returns false, causing an immediate hide.
     int m_nReattachGraceTicks = 0;
-
-    // Deferred CEF init timer (removed — now uses postToVclThread + synthetic WM_SIZE)
 
     // Backend document bridge (per-panel — rebuilt on each attach)
     std::unique_ptr<DocumentController> m_pDocController;
 
-    // NOTE: CefClient, CefMessageRouter, WebViewMessageHandler are NOT
-    // per-instance — they live in static storage in WebViewPanel.cxx
-    // and survive panel destruction/recreation.
+    // NOTE: CefClient, CefMessageRouter, WebViewMessageHandler, and the
+    // INativeCefHost are NOT per-instance — they live in static per-frame
+    // storage in WebViewPanel.cxx and survive panel destruction/recreation.
 };
 
 } // namespace officelabs
