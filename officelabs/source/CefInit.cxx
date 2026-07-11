@@ -53,13 +53,6 @@
 #include <cstdio>
 #endif
 
-// officelabs.cef Phase-1 instrumentation: SAL logging is compiled out of
-// this build (ENABLE_SAL_LOG is empty in config_host.mk), so SAL_WARN/
-// SAL_INFO calls produce no output. This macro writes straight to a file
-// so a single launch reveals exactly where mac CEF init fails. Remove once
-// the blank-panel root cause is fixed.
-#define OLCEF_LOG(...) \
-    do { FILE* f = fopen("/tmp/olcef.log", "a"); if (f) { fprintf(f, __VA_ARGS__); fclose(f); } } while (0)
 
 namespace {
 
@@ -117,9 +110,6 @@ CefInit::~CefInit()
 
 bool CefInit::initialize()
 {
-#ifdef MACOSX
-    OLCEF_LOG("initialize() reached, mainThread=%d\n", pthread_main_np());
-#endif
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_bInitialized)
         return true;
@@ -134,7 +124,6 @@ bool CefInit::initialize()
         {
             SAL_WARN("officelabs.cef",
                      "CefScopedLibraryLoader::LoadInMain() FAILED");
-            OLCEF_LOG("LoadInMain FAILED: %s\n", dlerror());
             g_oLibraryLoader.reset();
             return false;
         }
@@ -181,8 +170,6 @@ bool CefInit::initialize()
     {
         struct stat sSubprocessStat;
         bool bSubprocessExists = (::stat(utf8Path.getStr(), &sSubprocessStat) == 0);
-        OLCEF_LOG("subprocess path = %s (%s)\n", utf8Path.getStr(),
-                  bSubprocessExists ? "EXISTS" : "MISSING");
     }
 #endif
 
@@ -253,14 +240,7 @@ bool CefInit::initialize()
     browserApp = new OfficelabsBrowserApp();
 #endif
 
-#ifdef MACOSX
-    OLCEF_LOG("calling CefInitialize\n");
-#endif
     bool bCefInitOk = CefInitialize(main_args, settings, browserApp, nullptr);
-#ifdef MACOSX
-    OLCEF_LOG("CefInitialize returned %d, exit=%d\n", (int)bCefInitOk,
-              (int)CefGetExitCode());
-#endif
     if (!bCefInitOk)
     {
         SAL_WARN("officelabs.cef", "CefInitialize() FAILED");
