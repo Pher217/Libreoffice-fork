@@ -6,10 +6,11 @@
  * Only handles document operations (getDocument, getSelection, applyEdit).
  * Chat/streaming is handled directly by React via HTTP/SSE to the Python agent.
  *
- * THREADING: cefQuery callbacks arrive on the CEF IO thread.
+ * THREADING: cefQuery callbacks arrive on the browser-process UI thread.
  *            Document operations MUST be dispatched to the VCL main thread
  *            via Application::PostUserEvent().
- *            m_pPanel is atomic — read on CEF IO thread, written on VCL thread.
+ *            m_pPanel is atomic — read on the CEF browser UI thread, written
+ *            on the VCL thread.
  */
 
 #ifdef HAVE_FEATURE_CEF
@@ -17,6 +18,8 @@
 #include <officelabs/WebViewMessageHandler.hxx>
 #include <officelabs/WebViewPanel.hxx>
 #include <officelabs/DocumentController.hxx>
+#include <officelabs/AgentIdentity.hxx>
+#include <officelabs/ConsentBridge.hxx>
 
 #include <sal/log.hxx>
 #include <vcl/svapp.hxx>
@@ -165,6 +168,20 @@ bool WebViewMessageHandler::OnQuery(
         return true;
     }
 
+    if (req.find("\"type\":\"getSessionToken\"") != std::string::npos
+        || req.find("\"type\": \"getSessionToken\"") != std::string::npos)
+    {
+        handleGetSessionToken(callback);
+        return true;
+    }
+
+    if (req.find("\"type\":\"requestConsent\"") != std::string::npos
+        || req.find("\"type\": \"requestConsent\"") != std::string::npos)
+    {
+        handleRequestConsent(req, callback);
+        return true;
+    }
+
     // Unknown request type
     SAL_WARN("officelabs.cef", "Unknown cefQuery type: " << req.substr(0, 50));
     callback->Failure(404, "Unknown request type");
@@ -179,6 +196,80 @@ void WebViewMessageHandler::OnQueryCanceled(
     SAL_INFO("officelabs.cef", "cefQuery canceled");
 }
 
+// P0b wave B/C seam. The agent requires X-OfficeLabs-Session on every route
+// but /, /health and the docs surface; the WebView cannot read the 0600 token
+// file itself, so the native host reads it and hands it over.
+//
+// No VCL dispatch: this touches no document and no panel, so it answers
+// inline on the thread OnQuery arrives on -- the browser-process UI thread --
+// rather than queueing behind the VCL main thread. That matters because the
+// sidebar blocks on this before its first agent call. It is a bounded read of
+// a <=256-byte local file, which is why doing it inline is acceptable; a
+// larger or remote read here would stall that thread and must not be added.
+//
+// This does not make the token secret from page script. It cannot: whatever
+// the page can request, the page holds. It removes arbitrary local processes
+// and arbitrary web pages from the caller set, and nothing more. Consent for
+// macro execution is signed with install.secret, which is never handed over.
+void WebViewMessageHandler::handleGetSessionToken(CefRefPtr<Callback> callback)
+{
+    const OString sToken = readSessionToken();
+    if (sToken.isEmpty())
+    {
+        // Missing, unreadable, oversized or malformed all land here. The agent
+        // mints this at startup, so the usual cause is that it is not up yet.
+        // Failing is right either way: the UI retries, whereas handing back an
+        // empty token would look like success and then 401.
+        callback->Failure(503, "session token unavailable");
+        return;
+    }
+
+    callback->Success("{\"token\":\""
+                      + escapeJson(OStringToOUString(sToken, RTL_TEXTENCODING_UTF8)) + "\"}");
+}
+
+// P0b / D9. The page may ask for the dialog; it may not answer it.
+//
+// What the user is shown is fetched from the agent by the native side, against
+// an install-secret proof the page has never seen. The macro is agent-resolved
+// and the grant is keyed on the agent's own digest, so a page cannot show one
+// macro and run another. Capabilities are page-proposed but allowlisted, and
+// consume_grant refuses a run needing more than the grant carries -- the prompt
+// can overstate, never understate.
+//
+// It does NOT cover document_identity: the agent copies that straight from the
+// page's own challenge request and never verifies it. It is therefore not
+// displayed at all (see describeRequest); showing it would put attacker-chosen
+// text on the line a user reads to decide whether to trust this.
+//
+// The approval is signed here and posted to the agent directly; the page learns
+// only the resulting one-shot grant id, which it could not have produced.
+void WebViewMessageHandler::handleRequestConsent(const std::string& json,
+                                                 CefRefPtr<Callback> callback)
+{
+    const std::string sChallengeId = extractJsonString(json, "challengeId");
+    if (sChallengeId.empty())
+    {
+        callback->Failure(400, "challengeId required");
+        return;
+    }
+
+    CefRefPtr<Callback> cb = callback;
+    requestConsentAsync(OString(sChallengeId.c_str(), sChallengeId.size()),
+                        [cb](ConsentOutcome aOutcome) {
+                            if (!aOutcome.bGranted)
+                            {
+                                cb->Failure(403, aOutcome.sError.isEmpty()
+                                                     ? "consent denied"
+                                                     : aOutcome.sError.getStr());
+                                return;
+                            }
+                            const OUString sId
+                                = OStringToOUString(aOutcome.sConsentId, RTL_TEXTENCODING_UTF8);
+                            cb->Success("{\"consentId\":\"" + escapeJson(sId) + "\"}");
+                        });
+}
+
 void WebViewMessageHandler::handleGetDocument(CefRefPtr<Callback> callback)
 {
     WebViewPanel* panel = m_pPanel.load(std::memory_order_acquire);
@@ -191,7 +282,7 @@ void WebViewMessageHandler::handleGetDocument(CefRefPtr<Callback> callback)
     CefRefPtr<Callback> cb = callback;
 
     // Re-read panel pointer inside VCL lambda (panel may have been
-    // swapped between the CEF IO thread check and VCL dispatch).
+    // swapped between the CEF browser-UI-thread check and VCL dispatch).
     postToVclThread([this, cb]() {
         WebViewPanel* p = m_pPanel.load(std::memory_order_acquire);
         if (!p)
