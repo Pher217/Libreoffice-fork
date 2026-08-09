@@ -10,6 +10,8 @@
  *   getSelection - Get current selection
  *   applyEdit    - Apply/reject a pending edit
  *   getAppType   - Get current application type ("writer", "calc", "impress")
+ *   getSessionToken - Hand the WebView the agent's session token (P0b)
+ *   requestConsent  - Run the native consent dialog for a challenge (P0b, D9)
  *
  * THREADING: m_pPanel is std::atomic because it's read on the CEF IO
  *            thread (OnQuery) and written on the VCL thread (setPanel).
@@ -62,6 +64,8 @@ private:
     void handleApplyEdit(const std::string& json,
                          CefRefPtr<Callback> callback);
     void handleGetAppType(CefRefPtr<Callback> callback);
+    void handleGetSessionToken(CefRefPtr<Callback> callback);
+    void handleRequestConsent(const std::string& json, CefRefPtr<Callback> callback);
 
     std::atomic<WebViewPanel*> m_pPanel;
 };
