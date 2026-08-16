@@ -450,6 +450,12 @@
 
     </node>
 
+    <!-- Use UNO service names here, not ContextList pseudo-names like WriterVariants:
+         LastActiveDeck is resolved by vcl::EnumContext::GetApplicationEnum which only knows service names. -->
+    <prop oor:name="LastActiveDeck" oor:type="oor:string-list">
+      <value oor:separator=";">any,PropertyDeck;com.sun.star.text.TextDocument,AIDeck;com.sun.star.sheet.SpreadsheetDocument,AIDeck;com.sun.star.presentation.PresentationDocument,AIDeck;com.sun.star.drawing.DrawingDocument,AIDeck</value>
+    </prop>
+
     <node oor:name="PanelList">
 
       <node oor:name="StylesPropertyPanel" oor:op="replace">
