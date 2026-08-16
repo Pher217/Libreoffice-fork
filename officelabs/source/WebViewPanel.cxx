@@ -346,19 +346,22 @@ public:
         if (!frame || !frame->IsMain())
             return;
 
-        if (m_bShowingLoadError)
+        const std::string url = failedUrl.ToString();
+        if (url.rfind("data:", 0) == 0)
             return;
 
         if (errorCode == ERR_ABORTED)
             return;
 
-        const std::string url = failedUrl.ToString();
         const std::string text = errorText.ToString();
 
         SAL_WARN("officelabs.cef",
                  "Main frame load failed: url=" << url
                  << " code=" << static_cast<int>(errorCode)
                  << " text=" << text);
+
+        if (m_bShowingLoadError)
+            return;
 
         const std::string html =
             "<html><body>"
