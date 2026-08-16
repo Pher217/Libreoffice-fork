@@ -313,6 +313,30 @@ public:
     }
 
     // CefLoadHandler
+    void OnLoadStart(CefRefPtr<CefBrowser> /*browser*/,
+                     CefRefPtr<CefFrame> frame,
+                     TransitionType /*transitionType*/) override
+    {
+        if (frame && frame->IsMain())
+        {
+            const std::string url = frame->GetURL().ToString();
+            if (url.rfind("data:", 0) != 0)
+                m_bShowingLoadError = false;
+        }
+    }
+
+    void OnLoadEnd(CefRefPtr<CefBrowser> /*browser*/,
+                   CefRefPtr<CefFrame> frame,
+                   int /*httpStatusCode*/) override
+    {
+        if (frame && frame->IsMain())
+        {
+            const std::string url = frame->GetURL().ToString();
+            if (url.rfind("data:", 0) != 0)
+                m_bShowingLoadError = false;
+        }
+    }
+
     void OnLoadError(CefRefPtr<CefBrowser> /*browser*/,
                      CefRefPtr<CefFrame> frame,
                      ErrorCode errorCode,
@@ -320,6 +344,12 @@ public:
                      const CefString& failedUrl) override
     {
         if (!frame || !frame->IsMain())
+            return;
+
+        if (m_bShowingLoadError)
+            return;
+
+        if (errorCode == ERR_ABORTED)
             return;
 
         const std::string url = failedUrl.ToString();
@@ -338,6 +368,7 @@ public:
             "</body></html>";
 
         const std::string dataUrl = "data:text/html;charset=utf-8;base64," + base64Encode(html);
+        m_bShowingLoadError = true;
         frame->LoadURL(CefString(dataUrl));
     }
 
@@ -347,6 +378,7 @@ private:
     std::atomic<WebViewPanel*> m_pPanel;
     CefRefPtr<CefMessageRouterBrowserSide> m_messageRouter;
     CefRefPtr<CefBrowser> m_browser;  // cached for crash recovery
+    bool m_bShowingLoadError = false;   // guards the load-error fallback page
 };
 
 // ============================================================
