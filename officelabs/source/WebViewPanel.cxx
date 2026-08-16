@@ -668,6 +668,11 @@ OUString WebViewPanel::getUIUrl() const
     OUString sFileUrl;
     osl::FileBase::getAbsoluteFileURL(OUString(), sInstDir, sFileUrl);
 
+    // Issue #155: getAbsoluteFileURL may leave a trailing '/';
+    // avoid the double slash that causes CEF to fail loading the UI.
+    if (sFileUrl.endsWith("/"))
+        sFileUrl = sFileUrl.copy(0, sFileUrl.getLength() - 1);
+
     return sFileUrl + "/program/officelabs-ui/index.html";
 }
 
