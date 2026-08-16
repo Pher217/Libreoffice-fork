@@ -71,6 +71,7 @@
 
 #include <include/cef_app.h>
 #include <include/cef_keyboard_handler.h>
+#include <include/cef_load_handler.h>
 
 #include <functional>
 #include <cstdio>
@@ -140,6 +141,62 @@ void postToVclThread(std::function<void()> fn)
 
 } // anonymous namespace
 
+namespace {
+
+// Minimal helpers for the load-error fallback page.
+
+static std::string htmlEscape(const std::string& rInput)
+{
+    std::string aOutput;
+    aOutput.reserve(rInput.size());
+    for (char c : rInput)
+    {
+        switch (c)
+        {
+            case '&': aOutput += "&amp;"; break;
+            case '<': aOutput += "&lt;"; break;
+            case '>': aOutput += "&gt;"; break;
+            case '"': aOutput += "&quot;"; break;
+            case '\'': aOutput += "&#39;"; break;
+            default: aOutput += c; break;
+        }
+    }
+    return aOutput;
+}
+
+static std::string base64Encode(const std::string& rInput)
+{
+    static const char aChars[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string aOutput;
+    const size_t nLen = rInput.size();
+    size_t i = 0;
+    while (i + 3 <= nLen)
+    {
+        unsigned int v = (static_cast<unsigned char>(rInput[i]) << 16)
+                       | (static_cast<unsigned char>(rInput[i + 1]) << 8)
+                       | static_cast<unsigned char>(rInput[i + 2]);
+        aOutput += aChars[(v >> 18) & 0x3F];
+        aOutput += aChars[(v >> 12) & 0x3F];
+        aOutput += aChars[(v >> 6) & 0x3F];
+        aOutput += aChars[v & 0x3F];
+        i += 3;
+    }
+    if (i < nLen)
+    {
+        unsigned int v = static_cast<unsigned char>(rInput[i]) << 16;
+        if (i + 1 < nLen)
+            v |= static_cast<unsigned char>(rInput[i + 1]) << 8;
+        aOutput += aChars[(v >> 18) & 0x3F];
+        aOutput += aChars[(v >> 12) & 0x3F];
+        aOutput += (i + 1 < nLen) ? aChars[(v >> 6) & 0x3F] : '=';
+        aOutput += '=';
+    }
+    return aOutput;
+}
+
+} // anonymous namespace
+
 namespace officelabs {
 
 // ============================================================
@@ -148,7 +205,8 @@ namespace officelabs {
 class WebViewCefClient final : public CefClient,
                                 public CefLifeSpanHandler,
                                 public CefRequestHandler,
-                                public CefKeyboardHandler
+                                public CefKeyboardHandler,
+                                public CefLoadHandler
 {
 public:
     WebViewCefClient(WebViewPanel* pPanel,
@@ -168,6 +226,7 @@ public:
     CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
     CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
     CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
+    CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
 
     // CefKeyboardHandler — intercept LO-bound hotkeys before CEF handles them.
     // When the AI sidebar has keyboard focus (user clicked into the chat input),
@@ -253,12 +312,76 @@ public:
             browser, frame, source_process, message);
     }
 
+    // CefLoadHandler
+    void OnLoadStart(CefRefPtr<CefBrowser> /*browser*/,
+                     CefRefPtr<CefFrame> frame,
+                     TransitionType /*transitionType*/) override
+    {
+        if (frame && frame->IsMain())
+        {
+            const std::string url = frame->GetURL().ToString();
+            if (url.rfind("data:", 0) != 0)
+                m_bShowingLoadError = false;
+        }
+    }
+
+    void OnLoadEnd(CefRefPtr<CefBrowser> /*browser*/,
+                   CefRefPtr<CefFrame> frame,
+                   int /*httpStatusCode*/) override
+    {
+        if (frame && frame->IsMain())
+        {
+            const std::string url = frame->GetURL().ToString();
+            if (url.rfind("data:", 0) != 0)
+                m_bShowingLoadError = false;
+        }
+    }
+
+    void OnLoadError(CefRefPtr<CefBrowser> /*browser*/,
+                     CefRefPtr<CefFrame> frame,
+                     ErrorCode errorCode,
+                     const CefString& errorText,
+                     const CefString& failedUrl) override
+    {
+        if (!frame || !frame->IsMain())
+            return;
+
+        const std::string url = failedUrl.ToString();
+        if (url.rfind("data:", 0) == 0)
+            return;
+
+        if (errorCode == ERR_ABORTED)
+            return;
+
+        const std::string text = errorText.ToString();
+
+        SAL_WARN("officelabs.cef",
+                 "Main frame load failed: url=" << url
+                 << " code=" << static_cast<int>(errorCode)
+                 << " text=" << text);
+
+        if (m_bShowingLoadError)
+            return;
+
+        const std::string html =
+            "<html><body>"
+            "<h1>Sidebar failed to load</h1>"
+            "<p><strong>URL:</strong> " + htmlEscape(url) + "</p>"
+            "<p><strong>Error:</strong> " + htmlEscape(text) + "</p>"
+            "</body></html>";
+
+        const std::string dataUrl = "data:text/html;charset=utf-8;base64," + base64Encode(html);
+        m_bShowingLoadError = true;
+        frame->LoadURL(CefString(dataUrl));
+    }
+
     IMPLEMENT_REFCOUNTING(WebViewCefClient);
 
 private:
     std::atomic<WebViewPanel*> m_pPanel;
     CefRefPtr<CefMessageRouterBrowserSide> m_messageRouter;
     CefRefPtr<CefBrowser> m_browser;  // cached for crash recovery
+    bool m_bShowingLoadError = false;   // guards the load-error fallback page
 };
 
 // ============================================================
