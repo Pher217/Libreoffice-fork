@@ -96,6 +96,14 @@ OUString DocumentController::getApplicationType()
     return u"writer"_ustr;
 }
 
+OUString DocumentController::getDocumentUrl()
+{
+    if (!m_xModel.is())
+        return OUString();
+
+    return m_xModel->getURL();
+}
+
 OUString DocumentController::getDocumentText()
 {
     // Writer path

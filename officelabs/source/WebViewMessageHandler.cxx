@@ -168,6 +168,13 @@ bool WebViewMessageHandler::OnQuery(
         return true;
     }
 
+    if (req.find("\"type\":\"getDocumentUrl\"") != std::string::npos
+        || req.find("\"type\": \"getDocumentUrl\"") != std::string::npos)
+    {
+        handleGetDocumentUrl(callback);
+        return true;
+    }
+
     if (req.find("\"type\":\"getSessionToken\"") != std::string::npos
         || req.find("\"type\": \"getSessionToken\"") != std::string::npos)
     {
@@ -418,6 +425,36 @@ void WebViewMessageHandler::handleGetAppType(CefRefPtr<Callback> callback)
 
         OString utf8AppType = OUStringToOString(appType, RTL_TEXTENCODING_UTF8);
         std::string response = "{\"appType\":\"" + std::string(utf8AppType.getStr()) + "\"}";
+        cb->Success(response);
+    });
+}
+
+void WebViewMessageHandler::handleGetDocumentUrl(CefRefPtr<Callback> callback)
+{
+    WebViewPanel* panel = m_pPanel.load(std::memory_order_acquire);
+    if (!panel)
+    {
+        callback->Success("{\"url\":\"\"}");
+        return;
+    }
+
+    CefRefPtr<Callback> cb = callback;
+
+    postToVclThread([this, cb]() {
+        WebViewPanel* p = m_pPanel.load(std::memory_order_acquire);
+        if (!p)
+        {
+            cb->Success("{\"url\":\"\"}");
+            return;
+        }
+
+        p->detectDocument();
+
+        DocumentController* dc = p->getDocController();
+        OUString url = dc ? dc->getDocumentUrl() : OUString();
+
+        std::string escaped = escapeJson(url);
+        std::string response = "{\"url\":\"" + escaped + "\"}";
         cb->Success(response);
     });
 }
