@@ -64,6 +64,7 @@ private:
     void handleApplyEdit(const std::string& json,
                          CefRefPtr<Callback> callback);
     void handleGetAppType(CefRefPtr<Callback> callback);
+    void handleGetDocumentUrl(CefRefPtr<Callback> callback);
     void handleGetSessionToken(CefRefPtr<Callback> callback);
     void handleRequestConsent(const std::string& json, CefRefPtr<Callback> callback);
 

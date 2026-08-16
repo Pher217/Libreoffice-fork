@@ -46,6 +46,7 @@ public:
     bool hasDocument() const { return m_xDocument.is() || m_xCalcDoc.is() || m_xImpressDoc.is() || !m_sAppType.isEmpty(); }
 
     OUString getApplicationType();
+    OUString getDocumentUrl();
     OUString getDocumentText();
     OUString getSelectedText();
 };
