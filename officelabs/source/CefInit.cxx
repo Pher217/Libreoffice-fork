@@ -21,6 +21,7 @@
 
 #include <officelabs/CefInit.hxx>
 #include <officelabs/WebViewPanel.hxx>
+#include <officelabs/StudioWindow.hxx>
 
 #include <include/cef_app.h>
 #include <include/cef_browser.h>
@@ -291,6 +292,11 @@ void CefInit::shutdown()
         return;
 
     SAL_INFO("officelabs.cef", "Shutting down CEF...");
+
+    // The Studio window owns a browser CefShutdown() knows nothing about, and
+    // CEF requires every browser closed first. Do it while the message pump is
+    // still running, so the close can actually complete.
+    officelabs::closeStudioWindowAndWait();
 
     // Release persistent browser/popup/router BEFORE CefShutdown().
     // Static CefRefPtrs in WebViewPanel.cxx must be cleared while CEF
