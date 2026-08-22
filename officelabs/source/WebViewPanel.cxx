@@ -50,6 +50,7 @@
 #include <officelabs/CefInit.hxx>
 #include <officelabs/WebViewMessageHandler.hxx>
 #include <officelabs/DocumentController.hxx>
+#include <officelabs/StudioWindow.hxx>
 
 #include <sfx2/bindings.hxx>
 #include <sfx2/dispatch.hxx>
@@ -665,6 +666,20 @@ void WebViewPanel::initCefBrowser()
 
     state.browserCreated = true;
 
+    // INTERIM TRIGGER. D22's real entry point is Tools > Macros > Edit Macros,
+    // which means intercepting SID_BASICIDE_APPEAR -- and that interception must
+    // not merge before its two regression tests exist (a Basic runtime error
+    // still reaching the stock IDE with its shell, and the Basic Macros dialog's
+    // Edit button still landing on the named module). Until then the window is
+    // reachable only behind an env var, so nothing about the shipped product
+    // changes. Opened after the sidebar browser deliberately: the same run then
+    // exercises Views/SetAsChild coexistence.
+    if (const char* pEnv = std::getenv("OFFICELABS_STUDIO"))
+    {
+        if (pEnv[0] == '1')
+            officelabs::openStudioWindow();
+    }
+
     // Start resize tracking timer
     m_aResizeTimer.SetInvokeHandler(LINK(this, WebViewPanel, ResizeTimerHdl));
     m_aResizeTimer.SetTimeout(500);
@@ -813,7 +828,7 @@ void WebViewPanel::forwardKeyToFrame(int vkCode, bool bShift)
         m_pNativeHost->forwardKeyEvent(vkCode, bShift);
 }
 
-OUString WebViewPanel::getUIUrl() const
+OUString WebViewPanel::getUIUrl()
 {
     // Check for dev mode: OFFICELABS_UI_DEV_URL=http://localhost:5173
     const char* devUrl = std::getenv("OFFICELABS_UI_DEV_URL");

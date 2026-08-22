@@ -113,11 +113,17 @@ public:
     // table. Called by WebViewCefClient::OnPreKeyEvent.
     void forwardKeyToFrame(int vkCode, bool bShift);
 
+    /// file:// URL of the bundled UI, or the dev server when
+    /// OFFICELABS_UI_DEV_URL is set. Static and public because the Studio
+    /// window loads the same bundle and must not recompute the path: that
+    /// expansion has already been wrong twice (a trailing slash, issue #155;
+    /// an uncollapsed ".." that made the trust gate reject our own UI).
+    static OUString getUIUrl();
+
 private:
     void initOrReattachCefBrowser();
     void initCefBrowser();
     void reattachCefBrowser();
-    OUString getUIUrl() const;
 
     DECL_LINK(ResizeTimerHdl, Timer*, void);
 

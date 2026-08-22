@@ -84,6 +84,7 @@ $(eval $(call gb_Library_add_exception_objects,officelabs,\
     officelabs/source/CefInit \
     officelabs/source/ConsentBridge \
     officelabs/source/TrustedUrl \
+    officelabs/source/StudioWindow \
     officelabs/source/WebViewPanel \
     officelabs/source/WebViewMessageHandler \
     officelabs/source/OfficelabsBrowserApp \
@@ -93,6 +94,7 @@ $(eval $(call gb_Library_add_exception_objects,officelabs,\
 ifeq ($(OS),MACOSX)
 $(eval $(call gb_Library_add_objcxxobjects,officelabs,\
     officelabs/source/MessagePumpMac \
+    officelabs/source/StudioWindowMac \
 ))
 endif
 
