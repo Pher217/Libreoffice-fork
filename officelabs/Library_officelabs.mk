@@ -83,6 +83,7 @@ endif
 $(eval $(call gb_Library_add_exception_objects,officelabs,\
     officelabs/source/CefInit \
     officelabs/source/ConsentBridge \
+    officelabs/source/TrustedUrl \
     officelabs/source/WebViewPanel \
     officelabs/source/WebViewMessageHandler \
     officelabs/source/OfficelabsBrowserApp \

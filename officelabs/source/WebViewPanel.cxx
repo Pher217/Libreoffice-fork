@@ -45,6 +45,7 @@
 #ifdef HAVE_FEATURE_CEF
 
 #include <officelabs/WebViewPanel.hxx>
+#include <officelabs/TrustedUrl.hxx>
 #include <officelabs/INativeCefHost.hxx>
 #include <officelabs/CefInit.hxx>
 #include <officelabs/WebViewMessageHandler.hxx>
@@ -275,12 +276,50 @@ public:
     // CefRequestHandler
     bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
                         CefRefPtr<CefFrame> frame,
-                        CefRefPtr<CefRequest> /*request*/,
+                        CefRefPtr<CefRequest> request,
                         bool /*user_gesture*/,
                         bool /*is_redirect*/) override
     {
         m_messageRouter->OnBeforeBrowse(browser, frame);
-        return false;  // Allow the navigation
+
+        // Confine the WebView to our own UI. This used to return false
+        // unconditionally, so a link in agent output, a redirect, or an
+        // injected iframe could navigate the view to a remote page -- and the
+        // renderer injects cefQuery into EVERY page, so that page could then
+        // ask for the session token and reach the whole agent surface.
+        //
+        // Cancelling is the conservative half of the fix. The other half is in
+        // WebViewMessageHandler::OnQuery, which refuses to answer an untrusted
+        // frame even if one is somehow reached: two independent checks, because
+        // a single point of failure guarding a credential is not a boundary.
+        const OUString sUrl = OUString::fromUtf8(request->GetURL().ToString().c_str());
+        if (!officelabs::isTrustedUiUrl(sUrl))
+        {
+            SAL_WARN("officelabs.cef", "Blocked WebView navigation to an untrusted URL");
+            return true;  // cancel
+        }
+        return false;  // allow
+    }
+
+    /// No popups, ever. A popup is a new browser with our client, and it would
+    /// inherit cefQuery while being trivially opened by page script.
+    bool OnBeforePopup(CefRefPtr<CefBrowser> /*browser*/,
+                       CefRefPtr<CefFrame> /*frame*/,
+                       int /*popup_id*/,
+                       const CefString& target_url,
+                       const CefString& /*target_frame_name*/,
+                       CefLifeSpanHandler::WindowOpenDisposition /*target_disposition*/,
+                       bool /*user_gesture*/,
+                       const CefPopupFeatures& /*popupFeatures*/,
+                       CefWindowInfo& /*windowInfo*/,
+                       CefRefPtr<CefClient>& /*client*/,
+                       CefBrowserSettings& /*settings*/,
+                       CefRefPtr<CefDictionaryValue>& /*extra_info*/,
+                       bool* /*no_javascript_access*/) override
+    {
+        SAL_WARN("officelabs.cef", "Blocked WebView popup to "
+                 << target_url.ToString().substr(0, 80));
+        return true;  // cancel
     }
 
     void OnRenderProcessTerminated(CefRefPtr<CefBrowser> /*browser*/,

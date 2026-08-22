@@ -16,6 +16,7 @@
 #ifdef HAVE_FEATURE_CEF
 
 #include <officelabs/WebViewMessageHandler.hxx>
+#include <officelabs/TrustedUrl.hxx>
 #include <officelabs/WebViewPanel.hxx>
 #include <officelabs/DocumentController.hxx>
 #include <officelabs/AgentIdentity.hxx>
@@ -130,12 +131,30 @@ void WebViewMessageHandler::setPanel(WebViewPanel* pPanel)
 
 bool WebViewMessageHandler::OnQuery(
     CefRefPtr<CefBrowser> /*browser*/,
-    CefRefPtr<CefFrame> /*frame*/,
+    CefRefPtr<CefFrame> frame,
     int64_t /*query_id*/,
     const CefString& request,
     bool /*persistent*/,
     CefRefPtr<Callback> callback)
 {
+    // WHO is asking, before WHAT they asked. The renderer injects cefQuery into
+    // every page it loads, and these handlers answer whoever calls them --
+    // getSessionToken hands over the credential for the entire agent API, and
+    // requestConsent raises a native dialog the user is expected to trust.
+    // Neither may be reachable from a page that is not our own UI.
+    //
+    // Checked here as well as in OnBeforeBrowse deliberately. Navigation
+    // confinement is the first line; this is the one that still holds if a page
+    // arrives by a route that never passes through OnBeforeBrowse.
+    const OUString sFrameUrl
+        = frame ? OUString::fromUtf8(frame->GetURL().ToString().c_str()) : OUString();
+    if (!officelabs::isTrustedUiUrl(sFrameUrl))
+    {
+        SAL_WARN("officelabs.cef", "Refused a cefQuery from an untrusted frame");
+        callback->Failure(403, "cefQuery is not available to this page");
+        return true;
+    }
+
     std::string req = request.ToString();
     SAL_INFO("officelabs.cef", "cefQuery received: " << req.substr(0, 100));
 
