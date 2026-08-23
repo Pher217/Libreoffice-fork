@@ -3234,10 +3234,16 @@ if test "$with_cef" != "no" -a -n "$with_cef"; then
         fi
     elif test -d "$with_cef/include" -a -d "$with_cef/Release"; then
         ENABLE_CEF=TRUE
-        CEF_DIR="$with_cef"
-        CEF_CFLAGS="-I$with_cef -I$with_cef/include"
-        CEF_LIBS="$with_cef/Release/libcef.lib"
-        AC_MSG_RESULT([using CEF from $with_cef])
+        dnl On Windows the build runs under Cygwin but compiles with MSVC, which
+        dnl cannot resolve a /cygdrive/... pathname. Store CEF_DIR in the native
+        dnl C:/... form the rest of the Windows build uses; otherwise cl.exe is
+        dnl handed -I/cygdrive/... and every CEF include fails with C1083.
+        dnl PathFormat is a no-op on non-Cygwin build hosts.
+        PathFormat "$with_cef"
+        CEF_DIR="$formatted_path"
+        CEF_CFLAGS="-I$CEF_DIR -I$CEF_DIR/include"
+        CEF_LIBS="$CEF_DIR/Release/libcef.lib"
+        AC_MSG_RESULT([using CEF from $CEF_DIR])
     else
         AC_MSG_ERROR([CEF directory $with_cef does not contain expected structure (include/ and Release/ required)])
     fi
