@@ -1,9 +1,25 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 50" width="300" height="50">
-  <rect width="300" height="50" fill="#ffffff"/>
-  <!-- Teal diamond icon -->
-  <g transform="translate(25, 25)">
-    <polygon points="0,-14 14,0 0,14 -14,0" fill="#0D9488"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 56" width="260" height="56">
+  <defs>
+    <radialGradient id="ls1" cx="35%" cy="30%" r="75%">
+      <stop offset="0%" stop-color="#93C5FD"></stop>
+      <stop offset="55%" stop-color="#3B82F6"></stop>
+      <stop offset="100%" stop-color="#1E3A8A"></stop>
+    </radialGradient>
+    <radialGradient id="ls2" cx="35%" cy="30%" r="75%">
+      <stop offset="0%" stop-color="#67E8F9"></stop>
+      <stop offset="55%" stop-color="#0EA5E9"></stop>
+      <stop offset="100%" stop-color="#0C4A6E"></stop>
+    </radialGradient>
+    <radialGradient id="ls3" cx="35%" cy="30%" r="75%">
+      <stop offset="0%" stop-color="#A5B4FC"></stop>
+      <stop offset="55%" stop-color="#6366F1"></stop>
+      <stop offset="100%" stop-color="#1E1B4B"></stop>
+    </radialGradient>
+  </defs>
+  <g transform="translate(4,4)">
+    <circle cx="16" cy="18" r="10" fill="url(#ls1)"></circle>
+    <circle cx="32" cy="18" r="10" fill="url(#ls2)"></circle>
+    <circle cx="24" cy="32" r="10" fill="url(#ls3)"></circle>
   </g>
-  <!-- OfficeLabs wordmark -->
-  <text x="50" y="32" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="24" font-weight="600" fill="#1e293b" letter-spacing="0.5">OfficeLabs</text>
+  <text x="64" y="36" font-family="-apple-system, BlinkMacSystemFont, &#39;Segoe UI&#39;, Roboto, sans-serif" font-size="22" font-weight="600" letter-spacing="-0.01em" fill="#0F172A">OfficeLabs</text>
 </svg>
