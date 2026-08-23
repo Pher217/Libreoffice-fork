@@ -1,7 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
-  <!-- Teal diamond icon - small inverted variant -->
-  <rect width="32" height="32" fill="#1e293b" rx="2"/>
-  <g transform="translate(16, 16)">
-    <polygon points="0,-12 12,0 0,12 -12,0" fill="#0D9488"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <defs>
+    <radialGradient id="is1" cx="35%" cy="30%" r="75%">
+      <stop offset="0%" stop-color="#BFDBFE"></stop>
+      <stop offset="60%" stop-color="#2563EB"></stop>
+      <stop offset="100%" stop-color="#172554"></stop>
+    </radialGradient>
+    <radialGradient id="is2" cx="35%" cy="30%" r="75%">
+      <stop offset="0%" stop-color="#A5F3FC"></stop>
+      <stop offset="60%" stop-color="#0284C7"></stop>
+      <stop offset="100%" stop-color="#082F49"></stop>
+    </radialGradient>
+    <radialGradient id="is3" cx="35%" cy="30%" r="75%">
+      <stop offset="0%" stop-color="#C7D2FE"></stop>
+      <stop offset="60%" stop-color="#4F46E5"></stop>
+      <stop offset="100%" stop-color="#1E1B4B"></stop>
+    </radialGradient>
+  </defs>
+  <circle cx="16" cy="18" r="10" fill="url(#is1)"></circle>
+  <circle cx="32" cy="18" r="10" fill="url(#is2)"></circle>
+  <circle cx="24" cy="32" r="10" fill="url(#is3)"></circle>
 </svg>
