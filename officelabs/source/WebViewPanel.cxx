@@ -845,8 +845,10 @@ OUString WebViewPanel::getUIUrl()
     OUString sFileUrl;
     osl::FileBase::getAbsoluteFileURL(OUString(), sInstDir, sFileUrl);
 
-    // Issue #155: getAbsoluteFileURL may leave a trailing '/';
-    // avoid the double slash that causes CEF to fail loading the UI.
+    // Issue #155: normalise the join so exactly one '/' separates the base
+    // from the relative path. getAbsoluteFileURL leaves a trailing '/' on
+    // macOS bundles (e.g. ".../OfficeLabs.app/Contents/"), so a naive
+    // sFileUrl + "/program/..." produces "//" in the file URL.
     if (sFileUrl.endsWith("/"))
         sFileUrl = sFileUrl.copy(0, sFileUrl.getLength() - 1);
 
