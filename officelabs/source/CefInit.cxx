@@ -287,6 +287,13 @@ bool CefInit::initialize()
 
 void CefInit::shutdown()
 {
+    // Re-entrancy check BEFORE the lock, because the lock is what would hang.
+    // A nested shutdown is a no-op: the outer call is already doing the work,
+    // and there is exactly one CEF to shut down.
+    bool bExpected = false;
+    if (!m_bShuttingDown.compare_exchange_strong(bExpected, true))
+        return;
+
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_bInitialized)
         return;
