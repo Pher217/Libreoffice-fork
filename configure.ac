@@ -16162,8 +16162,19 @@ if test "$build_os" = "cygwin" -o "$build_os" = wsl -o -n "$WSL_ONLY_AS_HELPER";
         ATL_INCLUDE="$WINDOWS_SDK_HOME/include/atl"
     fi
     ATL_LIB="$ATL_LIB/$WIN_HOST_ARCH"
-    ATL_LIB=`win_short_path_for_make "$ATL_LIB"`
-    ATL_INCLUDE=`win_short_path_for_make "$ATL_INCLUDE"`
+    dnl ATL_LIB and ATL_INCLUDE are consumed RAW by the MSVC linker and compiler
+    dnl -- "$(ATL_LIB)/atls.lib" and "-LIBPATH:$(ATL_LIB)" in embedserv,
+    dnl extensions (oleautobridge, so_activex) and winaccessibility (uacccom) --
+    dnl so they must be native Windows paths, not cygwin ones. Note that
+    dnl win_short_path_for_make only yields a native path when a native Win32
+    dnl GNU Make is in use; with Cygwin's make it converts the already-native
+    dnl $COMPATH back INTO /cygdrive/... form, and link.exe then reads the
+    dnl leading slash as an option (LNK4044) and fails with LNK1104. Use
+    dnl PathFormat, which is native-or-noop on every build host.
+    PathFormat "$ATL_LIB"
+    ATL_LIB="$formatted_path"
+    PathFormat "$ATL_INCLUDE"
+    ATL_INCLUDE="$formatted_path"
 fi
 
 if test "$build_os" = "cygwin"; then
