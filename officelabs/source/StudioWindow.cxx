@@ -24,6 +24,9 @@
 #include <sal/log.hxx>
 
 #include <atomic>
+#include <mutex>
+#include <cstdio>
+#include <cstdlib>
 #include <chrono>
 #include <memory>
 #include <thread>
@@ -41,9 +44,40 @@ void studioWindowPumpNativeEvents(double fSeconds);
 namespace
 {
 
+/// Guards g_studioWindow. On macOS the CEF UI thread and the thread running
+/// shutdown are the same thread, so the refptr was safe by coincidence of
+/// platform. On Windows multi_threaded_message_loop puts the CEF UI thread
+/// elsewhere: OnWindowDestroyed clears this while closeStudioWindowAndWait
+/// reads it, and two unsynchronised releases of one refcount is a
+/// double-release. The mutex is what makes the Windows path correct by
+/// construction rather than by luck -- it is not merely untested there.
+/// SAL_WARN compiles out in this fork's build (ENABLE_SAL_LOG is empty), so an
+/// event on the shutdown path would otherwise be unobservable in a shipped
+/// build. TrustedUrl.cxx has the same problem and solved it with an env-gated
+/// file; its writer is file-local, so this is the same eight lines rather than
+/// a new exported API for one call site.
+void logStudioEvent(const char* what)
+{
+    const char* p = std::getenv("OFFICELABS_TRUST_LOG");
+    if (!p || !*p) return;
+    std::FILE* f = std::fopen(p, "a");
+    if (!f) return;
+    std::fprintf(f, "%s\n", what);
+    std::fclose(f);
+}
+
+std::mutex g_studioWindowMutex;
 CefRefPtr<CefWindow> g_studioWindow;
 std::atomic<bool> g_bBrowserClosed{ false };
 std::atomic<bool> g_bWindowDestroyed{ false };
+
+/// Take a reference under the lock, so the caller holds the window alive for
+/// the duration of its own use even if the UI thread clears the global.
+CefRefPtr<CefWindow> takeStudioWindow()
+{
+    std::lock_guard<std::mutex> aGuard(g_studioWindowMutex);
+    return g_studioWindow;
+}
 
 /// The Studio's URL: the same bundle the sidebar loads, with ?view=studio.
 ///
@@ -263,9 +297,15 @@ public:
 
     void OnWindowDestroyed(CefRefPtr<CefWindow>) override
     {
-        g_bWindowDestroyed.store(true, std::memory_order_release);
-        g_studioWindow = nullptr;
+        {
+            std::lock_guard<std::mutex> aGuard(g_studioWindowMutex);
+            g_studioWindow = nullptr;
+        }
         m_browserView = nullptr;
+        // LAST, deliberately. The shutdown thread breaks its wait on this flag
+        // and calls CefShutdown() immediately; setting it on entry let that
+        // happen while this callback was still tearing the window down.
+        g_bWindowDestroyed.store(true, std::memory_order_release);
     }
 
     bool CanResize(CefRefPtr<CefWindow>) override { return true; }
@@ -326,9 +366,24 @@ void createStudioWindowOnUiThread(void* hOwnerFrame)
         return;
     }
 
-    g_studioWindow = CefWindow::CreateTopLevelWindow(new StudioWindowDelegate(browserView));
-    if (!g_studioWindow)
+    CefRefPtr<CefWindow> window
+        = CefWindow::CreateTopLevelWindow(new StudioWindowDelegate(browserView));
+    if (!window)
+    {
         SAL_WARN("officelabs.cef", "CreateTopLevelWindow returned null");
+        // The browser was already created by CreateBrowserView above. Dropping
+        // browserView here would leave it live and unreachable -- the close
+        // path only knows about windows -- and CefShutdown() with a live
+        // browser hangs or crashes on the NEXT quit, not this one.
+        if (CefRefPtr<CefBrowser> orphan = browserView->GetBrowser())
+            orphan->GetHost()->CloseBrowser(true);
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> aGuard(g_studioWindowMutex);
+        g_studioWindow = window;
+    }
 }
 
 class CreateStudioWindowTask final : public CefTask
@@ -407,11 +462,12 @@ void closeStudioWindowForFrame(void* hFrame)
 
 void closeStudioWindowAndWait()
 {
-    if (!g_studioWindow)
+    CefRefPtr<CefWindow> window = takeStudioWindow();
+    if (!window)
         return;
 
     if (CefCurrentlyOn(TID_UI))
-        g_studioWindow->Close();
+        window->Close();
     else
         CefPostTask(TID_UI, new CloseStudioWindowTask());
 
@@ -434,9 +490,18 @@ void closeStudioWindowAndWait()
     }
 
     if (!g_bWindowDestroyed.load(std::memory_order_acquire))
+    {
+        // SAL_WARN compiles out in this fork's build, so the one event that
+        // precedes a CefShutdown()-with-live-browser crash would otherwise
+        // leave no trace at all. Mirror it into the trust log, which is the
+        // only sink that survives a shipped build.
         SAL_WARN("officelabs.cef", "Studio window did not close within 3s; continuing shutdown");
+        logStudioEvent("STUDIO give-up: window did not close within 3s");
+    }
 
-    g_studioWindow = nullptr;
+    // Deliberately NOT cleared here. The global belongs to the CEF UI thread;
+    // OnWindowDestroyed clears it under the lock. Clearing it from this thread
+    // was the second unsynchronised release.
 }
 
 } // namespace officelabs

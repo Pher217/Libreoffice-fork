@@ -20,6 +20,7 @@
 
 #include <officelabs/officelabsdllapi.h>
 #include <rtl/ustring.hxx>
+#include <atomic>
 #include <mutex>
 
 namespace officelabs {
@@ -51,6 +52,12 @@ private:
 
     bool m_bInitialized;
     std::mutex m_mutex;
+    /// Guards against shutdown() re-entering itself. closeStudioWindowAndWait()
+    /// pumps the native run loop on macOS, so an event delivered during that
+    /// pump can call back into shutdown() ON THIS SAME THREAD -- and m_mutex is
+    /// non-recursive, so that is a self-deadlock during quit. Checked before
+    /// the lock is taken, because the lock is the thing that would hang.
+    std::atomic<bool> m_bShuttingDown{ false };
 };
 
 } // namespace officelabs
