@@ -100,6 +100,7 @@ struct ImplTabCtrlData
 void TabControl::ImplInit( vcl::Window* pParent, WinBits nStyle )
 {
     mbLayoutDirty = true;
+    mbOfficelabsFlatTabs = false;
 
     if ( !(nStyle & WB_NOTABSTOP) )
         nStyle |= WB_TABSTOP;
@@ -158,7 +159,7 @@ void TabControl::ImplInitSettings( bool bBackground )
         return;
 
     vcl::Window* pParent = GetParent();
-    if ( !IsControlBackground() &&
+    if ( !IsControlBackground() && !mbOfficelabsFlatTabs &&
         (pParent->IsChildTransparentModeEnabled()
         || IsNativeControlSupported(ControlType::TabPane, ControlPart::Entire)
         || IsNativeControlSupported(ControlType::TabItem, ControlPart::Entire) ) )
@@ -181,6 +182,15 @@ void TabControl::ImplInitSettings( bool bBackground )
 
     if ( IsControlBackground() )
         SetBackground( GetControlBackground() );
+    else if ( mbOfficelabsFlatTabs )
+    {
+        // the notebookbar strip has to be opaque in the OfficeLabs palette: no native
+        // widget fills it any more (see the TabPane branch in Paint). Take the colour
+        // from the same place NotebookBar::UpdateBackground() does rather than from the
+        // parent, whose wallpaper may still be empty at construction time.
+        SetBackground( Wallpaper( GetSettings().GetStyleSettings().GetDialogColor() ) );
+        ImplGetWindowImpl()->mbUseNativeFocus = false;
+    }
     else
         SetBackground( pParent->GetBackground() );
 }
@@ -1143,7 +1153,11 @@ void TabControl::Paint( vcl::RenderContext& rRenderContext, const tools::Rectang
         aRect.AdjustRight(10 );
     }
 
-    if (rRenderContext.IsNativeControlSupported(ControlType::TabPane, ControlPart::Entire))
+    // skip native pane/header rendering for the notebookbar, as for the tab items above:
+    // uxtheme would otherwise paint its own light grey over the OfficeLabs background
+    const bool bNativePaneOK = !mbOfficelabsFlatTabs
+        && rRenderContext.IsNativeControlSupported(ControlType::TabPane, ControlPart::Entire);
+    if (bNativePaneOK)
     {
         const bool bPaneWithHeader = mbShowTabs && rRenderContext.IsNativeControlSupported(ControlType::TabPane, ControlPart::TabPaneWithHeader);
         tools::Rectangle aHeaderRect(aRect.Left(), 0, aRect.Right(), aRect.Top());
@@ -2215,6 +2229,11 @@ NotebookbarTabControlBase::NotebookbarTabControlBase(vcl::Window* pParent)
     , bLastContextWasSupported(true)
     , eLastContext(vcl::EnumContext::Context::Any)
 {
+    // set after the base constructor ran: ImplInitSettings() is reached from
+    // TabControl::ImplInit(), where the derived type does not exist yet
+    mbOfficelabsFlatTabs = true;
+    ImplInitSettings( true );
+
     m_pOpenMenu = VclPtr<PushButton>::Create( this , WB_CENTER | WB_VCENTER );
     m_pOpenMenu->SetClickHdl(LINK(this, NotebookbarTabControlBase, OpenMenu));
     m_pOpenMenu->SetModeImage(Image(StockImage::Yes, SV_RESID_BITMAP_NOTEBOOKBAR));
