@@ -5,6 +5,7 @@
 #include <comphelper/hash.hxx>
 #include <rtl/strbuf.hxx>
 #include <osl/file.hxx>
+#include <osl/process.h>
 #include <osl/security.hxx>
 #include <sal/log.hxx>
 
@@ -37,18 +38,60 @@ bool isHexChar(char c)
 /// catch a truncated file: the first N characters of a real token are still
 /// valid. A partial write mid-rotation must read as "no secret" — which the
 /// caller retries — rather than as a bad one, which merely 401s later.
-OString readIdentityFile(std::u16string_view aName, sal_Int32 nExpectedLength,
-                         bool (*pIsValidChar)(char))
+/// The directory holding session.token and install.secret, as a file URL.
+///
+/// NOT osl::Security::getHomeDir(). On Windows that is implemented as
+/// GetSpecialFolder(FOLDERID_Documents) (sal/osl/w32/security.cxx), so with
+/// OneDrive Known Folder Move it resolves to
+/// C:/Users/<u>/OneDrive/Documents -- while the agent, which WRITES these
+/// files, uses Python's Path.home(), i.e. the profile. The two runtimes
+/// therefore looked in different directories and the sidebar could not
+/// authenticate at all.
+///
+/// Windows now uses %LOCALAPPDATA%/OfficeLabs: per-user, per-machine, and not
+/// roamed or cloud-synced. That last property is the point rather than a
+/// nicety -- install.secret is persistent and authorises code execution, so
+/// syncing it to Documents would copy a code-execution credential to the
+/// cloud and to every other signed-in device, and would break its
+/// "per-install" meaning. The agent's default_identity_dir() reads the same
+/// LOCALAPPDATA variable, so the two agree by construction.
+///
+/// POSIX keeps ~/.officelabs, where $HOME already means the profile.
+OUString identityDirUrl()
 {
+#ifdef _WIN32
+    OUString sLocalAppData;
+    if (osl_getEnvironment(u"LOCALAPPDATA"_ustr.pData, &sLocalAppData.pData)
+            == osl_Process_E_None
+        && !sLocalAppData.isEmpty())
+    {
+        OUString sUrl;
+        if (osl::FileBase::getFileURLFromSystemPath(sLocalAppData, sUrl)
+            == osl::FileBase::E_None)
+        {
+            return sUrl + "/OfficeLabs";
+        }
+    }
+    SAL_WARN("officelabs.cef", "LOCALAPPDATA unusable; falling back to home dir");
+#endif
     OUString sHomeUrl;
     osl::Security aSecurity;
     if (!aSecurity.getHomeDir(sHomeUrl) || sHomeUrl.isEmpty())
+        return OUString();
+    return sHomeUrl + "/.officelabs";
+}
+
+OString readIdentityFile(std::u16string_view aName, sal_Int32 nExpectedLength,
+                         bool (*pIsValidChar)(char))
+{
+    const OUString sDir = identityDirUrl();
+    if (sDir.isEmpty())
     {
-        SAL_WARN("officelabs.cef", "could not resolve home directory");
+        SAL_WARN("officelabs.cef", "could not resolve identity directory");
         return OString();
     }
 
-    const OUString sUrl = sHomeUrl + "/.officelabs/" + aName;
+    const OUString sUrl = sDir + "/" + aName;
     osl::File aFile(sUrl);
     if (aFile.open(osl_File_OpenFlag_Read) != osl::FileBase::E_None)
     {
