@@ -6,7 +6,22 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
+// curl/curl.h reaches <winsock2.h>/<windows.h> on Windows, and windows.h still
+// defines the legacy Yield() macro. Left alone it erases the declaration of
+// Application::Yield() in vcl/svapp.hxx below, failing as
+//     svapp.hxx(502): error C2208: 'void': no members defined using this type
+// Wrap the offending include -- not the file -- in prewin/postwin: prewin
+// defines the IN/OUT SAL annotations winsock2.h needs and pulls in windows.h,
+// postwin then undefines Yield (and IN/OUT) before any vcl header is seen.
+// Sandwiching this file's top instead would strip IN/OUT before winsock2.h is
+// parsed, which fails as C2065: 'IN': undeclared identifier.
+#ifdef _WIN32
+#include <prewin.h>
+#endif
 #include <curl/curl.h>
+#ifdef _WIN32
+#include <postwin.h>
+#endif
 
 #include <osl/process.h>
 #include <rtl/strbuf.hxx>

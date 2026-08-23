@@ -3234,10 +3234,16 @@ if test "$with_cef" != "no" -a -n "$with_cef"; then
         fi
     elif test -d "$with_cef/include" -a -d "$with_cef/Release"; then
         ENABLE_CEF=TRUE
-        CEF_DIR="$with_cef"
-        CEF_CFLAGS="-I$with_cef -I$with_cef/include"
-        CEF_LIBS="$with_cef/Release/libcef.lib"
-        AC_MSG_RESULT([using CEF from $with_cef])
+        dnl On Windows the build runs under Cygwin but compiles with MSVC, which
+        dnl cannot resolve a /cygdrive/... pathname. Store CEF_DIR in the native
+        dnl C:/... form the rest of the Windows build uses; otherwise cl.exe is
+        dnl handed -I/cygdrive/... and every CEF include fails with C1083.
+        dnl PathFormat is a no-op on non-Cygwin build hosts.
+        PathFormat "$with_cef"
+        CEF_DIR="$formatted_path"
+        CEF_CFLAGS="-I$CEF_DIR -I$CEF_DIR/include"
+        CEF_LIBS="$CEF_DIR/Release/libcef.lib"
+        AC_MSG_RESULT([using CEF from $CEF_DIR])
     else
         AC_MSG_ERROR([CEF directory $with_cef does not contain expected structure (include/ and Release/ required)])
     fi
@@ -16162,8 +16168,19 @@ if test "$build_os" = "cygwin" -o "$build_os" = wsl -o -n "$WSL_ONLY_AS_HELPER";
         ATL_INCLUDE="$WINDOWS_SDK_HOME/include/atl"
     fi
     ATL_LIB="$ATL_LIB/$WIN_HOST_ARCH"
-    ATL_LIB=`win_short_path_for_make "$ATL_LIB"`
-    ATL_INCLUDE=`win_short_path_for_make "$ATL_INCLUDE"`
+    dnl ATL_LIB and ATL_INCLUDE are consumed RAW by the MSVC linker and compiler
+    dnl -- "$(ATL_LIB)/atls.lib" and "-LIBPATH:$(ATL_LIB)" in embedserv,
+    dnl extensions (oleautobridge, so_activex) and winaccessibility (uacccom) --
+    dnl so they must be native Windows paths, not cygwin ones. Note that
+    dnl win_short_path_for_make only yields a native path when a native Win32
+    dnl GNU Make is in use; with Cygwin's make it converts the already-native
+    dnl $COMPATH back INTO /cygdrive/... form, and link.exe then reads the
+    dnl leading slash as an option (LNK4044) and fails with LNK1104. Use
+    dnl PathFormat, which is native-or-noop on every build host.
+    PathFormat "$ATL_LIB"
+    ATL_LIB="$formatted_path"
+    PathFormat "$ATL_INCLUDE"
+    ATL_INCLUDE="$formatted_path"
 fi
 
 if test "$build_os" = "cygwin"; then
